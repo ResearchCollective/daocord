@@ -58,8 +58,23 @@ MAX_MESSAGE_NODES = 500
 
 
 def get_config(filename: str = "config.yaml") -> dict[str, Any]:
+    """Load YAML config and expand environment variables in all string values.
+    Supports $VAR and ${VAR} patterns anywhere in the string.
+    """
     with open(filename, encoding="utf-8") as file:
-        return yaml.safe_load(file)
+        raw = yaml.safe_load(file)
+
+    def _expand(obj):
+        if isinstance(obj, dict):
+            return {k: _expand(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_expand(v) for v in obj]
+        if isinstance(obj, str):
+            # Expand $VARS inside strings; leaves unknown vars unchanged
+            return os.path.expandvars(obj)
+        return obj
+
+    return _expand(raw)
 
 
 config = get_config()

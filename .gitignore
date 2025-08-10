@@ -1,4 +1,5 @@
-config.yaml
+config.yaml.true
+
 docs/
 .venv/
 .env
