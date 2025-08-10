@@ -1,5 +1,23 @@
+### DAO‑aware answers (sources guaranteed)
+- Answers are derived from your DAO’s Markdown docs in `docs/`.
+- Always appends a `Sources: <comma-separated files>` footer.
+
+### Focused, relevant context
+- Uses top‑N relevant snippets (not full dumps) to stay under token limits and improve accuracy.
+- Fast fuzzy prefilter avoids LLM calls for unrelated queries (returns a brief “not covered”).
+
+### Prompt hygiene and debugging
+- Global `system_prompt` from `config.yaml` is injected once.
+- When `debug_prompt: true`, the exact prompt (system + user + snippets) is printed to the terminal.
+
+### Gemini backend with safety toggle
+- Defaults to Gemini 2.5 Flash. You can disable safety filters via `disable_safety: true` in `config.yaml`.
+- If the model returns no text, the bot retries with reduced context automatically.
+
+### Stable Discord UX
+- Clear reconnect logs when your machine sleeps or network drops.
 <h1 align="center">
-  llmcord
+  DAOcord (llmcord fork)
 </h1>
 
 <h3 align="center"><i>
@@ -10,7 +28,14 @@
   <img src="https://github.com/user-attachments/assets/7791cc6b-6755-484f-a9e3-0707765b081f" alt="">
 </p>
 
-llmcord transforms Discord into a collaborative LLM frontend. It works with practically any LLM, remote or locally hosted.
+DAOcord is a Discord bot that answers questions using your DAO's documentation. It’s a focused fork of `llmcord` with:
+
+- Google Gemini 2.5 Flash integration (fast, concise answers)
+- DAO docs context injection from local Markdown files (`docs/`)
+- Top‑N snippet retrieval for relevance and citations
+- Mandatory “Sources:” footer citing files used
+- Debug prompt printing to terminal for easy inspection
+- Optional safety disable (BLOCK_NONE) for Gemini
 
 ## Features
 
@@ -61,7 +86,7 @@ Or run local models with:
 - Fully asynchronous
 - 1 Python file, ~200 lines of code
 
-## Instructions
+## Quick start
 
 1. Clone the repo:
    ```bash
@@ -69,6 +94,34 @@ Or run local models with:
    ```
 
 2. Create a copy of "config-example.yaml" named "config.yaml" and set it up:
+
+#### Minimum config for DAOcord
+
+```yaml
+# Discord
+bot_token: "YOUR_DISCORD_BOT_TOKEN"
+client_id: "YOUR_DISCORD_APP_CLIENT_ID"
+
+# Behavior
+system_prompt: |
+  You are a helpful assistant for a DAO. Answer only using the provided DAO docs.
+debug_prompt: true           # prints the exact prompt to terminal
+disable_safety: false        # set to true to turn off Gemini safety blocks
+
+# LLM providers
+providers:
+  gemini:
+    api_key: "YOUR_GEMINI_API_KEY"  # or set GEMINI_API_KEY env var
+
+# Models (first entry is default)
+models:
+  google/gemini-2.5-flash: {}
+```
+
+3. Put your DAO Markdown docs under the `docs/` folder at the repo root.
+
+- This repo’s `.gitignore` already ignores `docs/` to keep private docs out of git.
+- Each `.md` file will be chunked and searchable; hidden files/folders are skipped.
 
 ### Discord settings:
 
@@ -92,7 +145,7 @@ Or run local models with:
 | **models** | Add the models you want to use in `<provider>/<model>: <parameters>` format (examples are included). When you run `/model` these models will show up as autocomplete suggestions.<br /><br />**Refer to each provider's documentation for supported parameters.**<br /><br />**The first model in your `models` list will be the default model at startup.**<br /><br />**Some vision models may need `:vision` added to the end of their name to enable image support.** |
 | **system_prompt** | Write anything you want to customize the bot's behavior!<br /><br />**Leave blank for no system prompt.**<br /><br />**You can use the `{date}` and `{time}` tags in your system prompt to insert the current date and time, based on your host computer's time zone.** |
 
-3. Run the bot:
+4. Run the bot:
 
    **No Docker:**
    ```bash
@@ -105,7 +158,26 @@ Or run local models with:
    docker compose up
    ```
 
-## Notes
+## Usage
+
+- Mention the bot in any channel and ask questions. The bot injects relevant DAO docs and replies concisely (max ~4 bullets).
+- If a query isn’t covered by docs, it returns a short “not covered” message without calling the LLM.
+- The last line always includes `Sources:` with the files used.
+
+## Configuration details
+
+- `system_prompt`: Global persona/guardrails. Inserted once at the top of the prompt.
+- `debug_prompt`: When true, logs the entire prompt for auditing (no Discord attachments).
+- `disable_safety`: When true, passes `BLOCK_NONE` safety settings to Gemini.
+- API key detection: Reads from `providers.gemini.api_key`, `providers.google.api_key`, or `GEMINI_API_KEY` env var.
+- Model selection: Uses the first entry under `models` (recommend `google/gemini-2.5-flash`).
+
+## Maintaining your docs
+
+- Place/update Markdown in `docs/`. The bot indexes, chunks, and retrieves top matches per query.
+- Keep `docs/` ignored by git (already configured) and commit a public `config-example.yaml` without secrets.
+
+## Keeping upstream llmcord features
 
 - If you're having issues, try my suggestions [here](https://github.com/jakobdylanc/llmcord/issues/19)
 
