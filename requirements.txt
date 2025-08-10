@@ -1,0 +1,6 @@
+discord.py
+httpx
+openai
+pyyaml
+google-generativeai
+rapidfuzz
