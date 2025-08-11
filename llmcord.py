@@ -14,6 +14,7 @@ from openai import AsyncOpenAI
 import google.generativeai as genai
 import yaml
 from tools.dao_docs import DAODocsTool
+from tools.gdocs_cache import GDocsCache
 from aiohttp import client_exceptions
 import os
 
@@ -90,6 +91,18 @@ discord_bot = commands.Bot(intents=intents, activity=activity, command_prefix=No
 
 httpx_client = httpx.AsyncClient()
 dao_docs = DAODocsTool()
+# Initialize optional Google Docs cache (no-op if disabled in config)
+try:
+    gdocs_cache = GDocsCache(config)
+except Exception:
+    logging.exception("[gdocs] failed to initialize; continuing without gdocs")
+    class _NullGDocs:
+        enabled = False
+        def refresh(self):
+            return
+        def top_with_scores(self, *a, **k):
+            return []
+    gdocs_cache = _NullGDocs()
 
 
 @dataclass
@@ -106,6 +119,18 @@ class MsgNode:
     parent_msg: Optional[discord.Message] = None
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@discord_bot.event
+async def on_ready():
+    try:
+        # Kick off an initial refresh so the cache populates at startup
+        if getattr(gdocs_cache, "enabled", False):
+            logging.info("[gdocs] initial refresh on startup…")
+            await asyncio.to_thread(gdocs_cache.refresh)
+            logging.info("[gdocs] initial refresh complete")
+    except Exception:
+        logging.exception("[gdocs] initial refresh failed")
 
 
 @discord_bot.tree.command(name="model", description="View or switch the current model")
@@ -375,23 +400,41 @@ async def on_message(new_msg: discord.Message) -> None:
             logging.info("Adding system_prompt from config (chars=%d)", len(sys_prompt))
             messages.append(dict(role="system", content=sys_prompt))
 
-    # Inject DAO documentation context for MVP when triggered
+    # Inject DAO + optional Google Docs context when triggered
     if dao_trigger:
         try:
-            # Build focused context from top-N relevant chunks
-            scored = await asyncio.to_thread(dao_docs.top_with_scores, user_query, 12)
+            # Build focused context from top-N relevant chunks across sources
+            dao_top = await asyncio.to_thread(dao_docs.top_with_scores, user_query, 12)
+            merged = [("dao", p, c, s) for (p, c, s) in dao_top]
+            if getattr(gdocs_cache, "enabled", False):
+                # Refresh gdocs cache if needed and fetch top
+                await asyncio.to_thread(gdocs_cache.refresh)
+                g_top = await asyncio.to_thread(gdocs_cache.top_with_scores, user_query, 12)
+                merged.extend(("gdocs", p, c, s) for (p, c, s) in g_top)
+
+            # Sort by score desc and take top 12 overall
+            merged.sort(key=lambda t: t[3], reverse=True)
+            merged = merged[:12]
+
             sources = []
             parts = []
-            for path, chunk, score in scored:
+            for src, path, chunk, score in merged:
                 try:
-                    rel = os.path.relpath(path, "docs")
+                    if src == "dao":
+                        rel = os.path.relpath(path, "docs")
+                    else:
+                        rel = os.path.basename(path)
                 except Exception:
                     rel = os.path.basename(path)
-                if rel not in sources:
-                    sources.append(rel)
-                parts.append(f"### Source: {rel} (score {score})\n{chunk}")
+                label = f"{src}:{rel}"
+                if label not in sources:
+                    sources.append(label)
+                parts.append(f"### Source: {label} (score {score})\n{chunk}")
             docs_context = "\n\n".join(parts)
-            logging.info("Context built from %d chunks (%d unique sources), length=%d chars", len(scored), len(sources), len(docs_context))
+            logging.info(
+                "Context built from %d chunks (%d unique sources, gdocs=%s), length=%d chars",
+                len(merged), len(sources), "T" if getattr(gdocs_cache, "enabled", False) else "F", len(docs_context)
+            )
 
             context_prompt = (
                 "SYSTEM INSTRUCTIONS: Answer ONLY using the DAO documentation context below.\n"
@@ -587,25 +630,29 @@ async def on_message(new_msg: discord.Message) -> None:
                     logging.exception("Failed to gather sources for footer")
                     sources = []
 
-                sources_line = "\n\nSources: " + (", ".join(sources[:5]) if sources else "none")
-                # Reserve space for sources line by truncating body first
-                body_max = max_message_length - len(sources_line)
-                if body_max < 200:
-                    body_max = max_message_length  # fallback; still append sources
-                text = text[:body_max] + ("" if text.endswith(sources_line) else sources_line)
+                # Do not append a computed Sources footer; rely on the model output per prompt instructions
+                # Optionally truncate to max_message_length without adding any footer
+                try:
+                    text = text[:max_message_length]
+                except Exception:
+                    pass
+                logging.info("Generated response length: %d", len(text or ""))
                 # Respect plain vs embed output
-                if use_plain_responses:
-                    response_msg = await new_msg.reply(content=text, suppress_embeds=True)
-                    response_msgs.append(response_msg)
-                    msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
-                    await msg_nodes[response_msg.id].lock.acquire()
-                else:
-                    embed.description = text
-                    embed.color = EMBED_COLOR_COMPLETE
-                    response_msg = await new_msg.reply(embed=embed, silent=True)
-                    response_msgs.append(response_msg)
-                    msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
-                    await msg_nodes[response_msg.id].lock.acquire()
+                try:
+                    if use_plain_responses:
+                        response_msg = await new_msg.reply(content=(text or "(no content)"), suppress_embeds=True)
+                        response_msgs.append(response_msg)
+                        msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
+                        await msg_nodes[response_msg.id].lock.acquire()
+                    else:
+                        embed.description = text or "(no content)"
+                        embed.color = EMBED_COLOR_COMPLETE
+                        response_msg = await new_msg.reply(embed=embed, silent=True)
+                        response_msgs.append(response_msg)
+                        msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
+                        await msg_nodes[response_msg.id].lock.acquire()
+                except Exception:
+                    logging.exception("Failed to send Discord response message")
             else:
                 # OpenAI-compatible streaming path
                 # Optional debug: log exact prompt to terminal (OpenAI path)
