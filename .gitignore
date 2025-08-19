@@ -1,7 +1,10 @@
 config.yaml.true
 
+gdocs_cache/
 docs/
 .venv/
 .env
 
 *__pycache__/
+gen*json
+

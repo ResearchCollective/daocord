@@ -1,8 +1,8 @@
 # Discord settings:
 
-bot_token: "$DISCORD_BOT_TOKEN"
-client_id: "$DISCORD_CLIENT_ID"
-status_message: "$DISCORD_STATUS_MESSAGE"
+bot_token: $BOT_DISCORD_TOKEN
+client_id: $BOT_CLIENT_ID
+status_message: "Dog Years DAO Assistant"
 
 max_text: 100000
 max_images: 1
@@ -14,6 +14,69 @@ allow_dms: true
 
 debug_prompt: false
 test_echo_mode: false
+disable_safety: true
+
+gdocs:
+  enabled: true
+  google_application_credentials: $GOOGLE_APPLICATION_CREDENTIALS
+  folder_id: $GOOGLE_FOLDER_ID     # The Google Drive folder to sync (shared with your service account)
+  sync_interval_minutes: 360
+  cache_dir: "gdocs_cache"
+  max_files: 1000                      # guardrails
+  export_mime: "text/markdown"         # fallback to text/plain if markdown not supported
+
+
+twitter:
+  bearer_token_env: $X_BEARER_TOKEN
+  cache:
+    search_dir: "data/x/searches"
+    events_dir: "data/x/events"
+    ttl_hours: 24
+    calls_log: "data/logs/x_calls.jsonl"
+  logs:
+    calls_file: "data/logs/x_calls.jsonl"
+  monitor:
+    out_dir: "reports"
+  monitors:
+    name: "longevity-dogs"
+    query: "longevity dogs"
+    lang: en
+    search_limit: 15
+    since_days: 7
+    filters:
+      min_like: 5
+      include_any: ["trial", "study", "paper"]
+      exclude_any: ["giveaway"]
+    bundle:
+      self_limit: 10
+      quotes_limit: 10
+    
+    
+reddit:
+  client_id: $REDDIT_CLIENT_ID
+  client_secret: $REDDIT_CLIENT_SECRET
+  user_agent: "api-event-script"
+
+  cache:
+    search_dir: "data/reddit/searches"
+    events_dir: "data/reddit/events"
+    ttl_hours: 24
+    calls_log: "data/logs/reddit_calls.jsonl"
+  monitor:
+    out_dir: "reports"
+  monitors:
+    name: "longevity-dogs"
+    subs: ["longevity", "dogs"]
+    lang: en
+    search_limit: 15
+    since_days: 7
+    filters:
+      min_like: 5
+      include_any: ["trial", "study", "paper"]
+      exclude_any: ["giveaway"]
+    bundle:
+      self_limit: 10
+      quotes_limit: 10
 
 permissions:
   users:
@@ -32,6 +95,9 @@ permissions:
 
 providers:
   # Remote providers:
+  anthropic:
+    base_url: https://api.anthropic.com/v1
+    api_key: $ANTHROPIC_API_KEY
   google:
     base_url: https://generativelanguage.googleapis.com/v1beta/openai
     api_key: $GEMINI_API_KEY
@@ -60,9 +126,10 @@ providers:
     base_url: http://localhost:8000/v1
 
 models:
+  anthropic/claude-3-5-sonnet: {}
   google/gemini-2.5-flash: {}
   google/gemini-2.5-pro: 
     reasoning_effort: high
 
 
-system_prompt: "$BOT_SYSTEM_PROMPT"
+system_prompt: $SYSTEM_PROMPT_DAOCORD

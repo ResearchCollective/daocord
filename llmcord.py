@@ -12,11 +12,16 @@ from discord.ext import commands
 import httpx
 from openai import AsyncOpenAI
 import google.generativeai as genai
+try:
+    import anthropic
+except Exception:  # pragma: no cover
+    anthropic = None
 import yaml
 from tools.dao_docs import DAODocsTool
 from tools.gdocs_cache import GDocsCache
 from aiohttp import client_exceptions
 import os
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,6 +109,61 @@ except Exception:
             return []
     gdocs_cache = _NullGDocs()
 
+class ReportsCache:
+    """Lightweight indexer over markdown reports in a directory."""
+    def __init__(self, reports_dir: Path | str = "reports") -> None:
+        self.dir = Path(reports_dir)
+        self.enabled = self.dir.exists()
+        self.entries: list[tuple[Path, str, float]] = []  # (path, text, mtime)
+
+    def refresh(self) -> None:
+        try:
+            self.enabled = self.dir.exists()
+            self.entries = []
+            if not self.enabled:
+                return
+            for p in sorted(self.dir.glob("**/*.md")):
+                try:
+                    txt = p.read_text(encoding="utf-8", errors="ignore")
+                    mtime = p.stat().st_mtime
+                    self.entries.append((p, txt, mtime))
+                except Exception:
+                    logging.exception("[reports] failed reading %s", p)
+        except Exception:
+            logging.exception("[reports] refresh failed")
+
+    def top_with_scores(self, query: str, k: int = 10) -> list[tuple[str, str, float]]:
+        if not self.enabled or not self.entries:
+            return []
+        q = query.lower()
+        terms = [t for t in (''.join(ch if ch.isalnum() else ' ' for ch in q)).split() if len(t) > 2]
+        results: list[tuple[str, str, float]] = []
+        now = datetime.now().timestamp()
+        for path, text, mtime in self.entries:
+            tl = text.lower()
+            term_score = sum(tl.count(t) for t in terms) or 0.0
+            # Recency boost (up to +2.0 within ~14 days)
+            recency_days = max(0.0, (now - mtime) / 86400.0)
+            recency = max(0.0, 2.0 - (recency_days / 7.0))
+            score = term_score + recency
+            if score > 0:
+                # Extract a short snippet around the first strongest term
+                idx = -1
+                for t in terms:
+                    idx = tl.find(t)
+                    if idx != -1:
+                        break
+                start = max(0, idx - 200) if idx != -1 else 0
+                end = min(len(text), (idx + 200)) if idx != -1 else min(len(text), 400)
+                snippet = text[start:end].strip()
+                results.append((str(path), snippet, float(score)))
+        results.sort(key=lambda x: x[2], reverse=True)
+        return results[:k]
+
+# Initialize reports cache
+reports_dir = Path(config.get("reports_dir", "reports"))
+reports_cache = ReportsCache(reports_dir)
+
 
 @dataclass
 class MsgNode:
@@ -129,6 +189,10 @@ async def on_ready():
             logging.info("[gdocs] initial refresh on startup…")
             await asyncio.to_thread(gdocs_cache.refresh)
             logging.info("[gdocs] initial refresh complete")
+        # Refresh reports cache as well
+        logging.info("[reports] initial refresh on startup…")
+        await asyncio.to_thread(reports_cache.refresh)
+        logging.info("[reports] initial refresh complete")
     except Exception:
         logging.exception("[gdocs] initial refresh failed")
 
@@ -253,7 +317,8 @@ async def on_message(new_msg: discord.Message) -> None:
     if lower.startswith("!dao refresh"):
         try:
             await asyncio.to_thread(dao_docs.refresh)
-            await new_msg.reply("DAO docs refreshed.", suppress_embeds=True, silent=True)
+            await asyncio.to_thread(reports_cache.refresh)
+            await new_msg.reply("DAO docs and reports refreshed.", suppress_embeds=True, silent=True)
         except Exception as e:
             await new_msg.reply(f"Failed to refresh docs: {e}", suppress_embeds=True, silent=True)
         return
@@ -269,7 +334,8 @@ async def on_message(new_msg: discord.Message) -> None:
     # else:
     #     user_query = content_stripped
 
-    provider_slash_model = curr_model
+    # Always use the first model from config at message time (config is reloaded above)
+    provider_slash_model = next(iter(config.get("models", {}) or {"openai/gpt-4o-mini": {}}))
     provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
 
     provider_config = config.get("providers", {}).get(provider, {})
@@ -280,6 +346,8 @@ async def on_message(new_msg: discord.Message) -> None:
     gem_cfg = (config.get("providers", {}).get("gemini", {}) or {})
     goo_cfg = (config.get("providers", {}).get("google", {}) or {})
     gemini_api_key = gem_cfg.get("api_key") or goo_cfg.get("api_key") or os.getenv("GEMINI_API_KEY")
+    anth_cfg = (config.get("providers", {}).get("anthropic", {}) or {})
+    anthropic_api_key = anth_cfg.get("api_key") or os.getenv("ANTHROPIC_API_KEY")
     if gemini_api_key:
         try:
             genai.configure(api_key=gemini_api_key)
@@ -404,12 +472,14 @@ async def on_message(new_msg: discord.Message) -> None:
     if dao_trigger:
         try:
             # Build focused context from top-N relevant chunks across sources
-            dao_top = await asyncio.to_thread(dao_docs.top_with_scores, user_query, 12)
+            dao_top = await asyncio.to_thread(dao_docs.top_with_scores, user_query, 8)
             merged = [("dao", p, c, s) for (p, c, s) in dao_top]
+            rep_top = await asyncio.to_thread(reports_cache.top_with_scores, user_query, 8)
+            merged.extend(("report", p, c, s) for (p, c, s) in rep_top)
             if getattr(gdocs_cache, "enabled", False):
                 # Refresh gdocs cache if needed and fetch top
                 await asyncio.to_thread(gdocs_cache.refresh)
-                g_top = await asyncio.to_thread(gdocs_cache.top_with_scores, user_query, 12)
+                g_top = await asyncio.to_thread(gdocs_cache.top_with_scores, user_query, 8)
                 merged.extend(("gdocs", p, c, s) for (p, c, s) in g_top)
 
             # Sort by score desc and take top 12 overall
@@ -432,8 +502,9 @@ async def on_message(new_msg: discord.Message) -> None:
                 parts.append(f"### Source: {label} (score {score})\n{chunk}")
             docs_context = "\n\n".join(parts)
             logging.info(
-                "Context built from %d chunks (%d unique sources, gdocs=%s), length=%d chars",
-                len(merged), len(sources), "T" if getattr(gdocs_cache, "enabled", False) else "F", len(docs_context)
+                "Context built from %d chunks (%d unique sources, reports=%s, gdocs=%s), length=%d chars",
+                len(merged), len(sources), "T" if getattr(reports_cache, "enabled", False) else "F",
+                "T" if getattr(gdocs_cache, "enabled", False) else "F", len(docs_context)
             )
 
             context_prompt = (
@@ -448,16 +519,11 @@ async def on_message(new_msg: discord.Message) -> None:
         except Exception:
             logging.exception("Error generating DAO docs context")
 
-    # Determine provider/model (accept both 'gemini/' and 'google/' prefixes for Gemini)
-    model_key = next(iter(config.get("models", {}) or {"openai/gpt-4o-mini": {}}))
-    prov_lower, _, model_name_cfg = model_key.partition("/")
-    prov_lower = prov_lower.lower()
-    use_gemini = (prov_lower in ("gemini", "google")) and bool(gemini_api_key)
-    # Normalize Gemini model to prefer Flash for speed unless explicitly using a flash model already
-    gemini_model_name = model_name_cfg or model_key
-    if use_gemini and ("flash" not in gemini_model_name.lower()):
-        logging.info("Using Gemini Flash instead of configured '%s' for speed.", gemini_model_name)
-        gemini_model_name = "gemini-2.5-flash"
+    # Determine provider/model strictly from config
+    active_provider = provider.lower()
+    use_gemini = (active_provider in ("gemini", "google")) and bool(gemini_api_key)
+    use_anthropic = (active_provider == "anthropic") and bool(anthropic_api_key)
+    gemini_model_name = model
 
     # Generate and send response message(s)
     curr_content = finish_reason = edit_task = None
@@ -471,11 +537,12 @@ async def on_message(new_msg: discord.Message) -> None:
     use_plain_responses = config.get("use_plain_responses", False)
     max_message_length = 2000 if use_plain_responses else (4096 - len(STREAMING_INDICATOR))
 
-    # Fast relevance prefilter: if docs don't match the query well, skip LLM
+    # Fast relevance prefilter: if docs/reports don't match the query well, skip LLM
     if dao_trigger:
         try:
-            scored = await asyncio.to_thread(dao_docs.top_with_scores, user_query, 3)
-            best_score = max((s for _, _, s in scored), default=0)
+            scored_docs = await asyncio.to_thread(dao_docs.top_with_scores, user_query, 3)
+            scored_reports = await asyncio.to_thread(reports_cache.top_with_scores, user_query, 3)
+            best_score = max((s for _, _, s in (scored_docs + scored_reports)), default=0)
             # Threshold tuned conservatively; adjust as needed
             if best_score < 35:
                 not_covered = (
@@ -631,7 +698,8 @@ async def on_message(new_msg: discord.Message) -> None:
                     sources = []
 
                 # Do not append a computed Sources footer; rely on the model output per prompt instructions
-                # Optionally truncate to max_message_length without adding any footer
+                logging.info("Generated response length: %d", len(text or ""))
+                # Respect plain vs embed output
                 try:
                     text = text[:max_message_length]
                 except Exception:
@@ -653,6 +721,82 @@ async def on_message(new_msg: discord.Message) -> None:
                         await msg_nodes[response_msg.id].lock.acquire()
                 except Exception:
                     logging.exception("Failed to send Discord response message")
+            elif use_anthropic:
+                # Non-streaming path via Anthropic
+                if anthropic is None:
+                    raise RuntimeError("anthropic package not installed. Please install dependencies from requirements.txt.")
+
+                # Prepare system + messages for Anthropic
+                ordered = messages[::-1]
+                system_msgs = [m.get("content", "") for m in ordered if m.get("role") == "system"]
+                system_text = "\n\n".join([str(s) for s in system_msgs if s]) or None
+
+                def _to_text_parts(content: Any) -> list[dict[str, str]]:
+                    try:
+                        if isinstance(content, str):
+                            return [{"type": "text", "text": content}]
+                        if isinstance(content, list):
+                            parts: list[dict[str, str]] = []
+                            for p in content:
+                                if isinstance(p, dict) and p.get("type") == "text" and p.get("text"):
+                                    parts.append({"type": "text", "text": str(p["text"])})
+                                elif isinstance(p, dict) and p.get("type") == "image_url":
+                                    # Skip images for now in Anthropic path (could be extended to use input_images)
+                                    continue
+                                elif isinstance(p, str):
+                                    parts.append({"type": "text", "text": p})
+                            return parts or [{"type": "text", "text": ""}]
+                    except Exception:
+                        logging.exception("Failed to convert content to Anthropic text parts")
+                    return [{"type": "text", "text": str(content) if content is not None else ""}]
+
+                anth_messages = [
+                    {"role": m.get("role"), "content": _to_text_parts(m.get("content", ""))}
+                    for m in ordered
+                    if m.get("role") in ("user", "assistant")
+                ]
+
+                def _gen_anthropic():
+                    client = anthropic.Anthropic(api_key=anthropic_api_key)
+                    return client.messages.create(
+                        model=model,
+                        max_tokens=768,
+                        temperature=0.2,
+                        system=system_text,
+                        messages=anth_messages,
+                    )
+
+                resp = await asyncio.to_thread(_gen_anthropic)
+                # Extract text from content blocks
+                a_text = ""
+                try:
+                    for block in getattr(resp, "content", []) or []:
+                        if getattr(block, "type", None) == "text" and getattr(block, "text", None):
+                            a_text += (block.text or "")
+                except Exception:
+                    logging.exception("Failed to parse Anthropic response text")
+                text = a_text or ""
+
+                try:
+                    text = text[:max_message_length]
+                except Exception:
+                    pass
+
+                try:
+                    if use_plain_responses:
+                        response_msg = await new_msg.reply(content=(text or "(no content)"), suppress_embeds=True)
+                        response_msgs.append(response_msg)
+                        msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
+                        await msg_nodes[response_msg.id].lock.acquire()
+                    else:
+                        embed.description = text or "(no content)"
+                        embed.color = EMBED_COLOR_COMPLETE
+                        response_msg = await new_msg.reply(embed=embed, silent=True)
+                        response_msgs.append(response_msg)
+                        msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
+                        await msg_nodes[response_msg.id].lock.acquire()
+                except Exception:
+                    logging.exception("Failed to send Discord response message (Anthropic)")
             else:
                 # OpenAI-compatible streaming path
                 # Optional debug: log exact prompt to terminal (OpenAI path)
@@ -778,6 +922,11 @@ try:
         base_url = (config.get("providers", {}).get("openai", {}) or {}).get("base_url")
         api_present = bool((config.get("providers", {}).get("openai", {}) or {}).get("api_key") or os.getenv("OPENAI_API_KEY"))
         logging.info("Startup: backend=%s, model=%s, base_url=%s, api_key_present=%s", backend, model_name, base_url, api_present)
+    elif provider_startup == "anthropic":
+        backend = "Anthropic"
+        model_name = model_key_startup.split("/", 1)[1] if "/" in model_key_startup else model_key_startup
+        api_present = bool((config.get("providers", {}).get("anthropic", {}) or {}).get("api_key") or os.getenv("ANTHROPIC_API_KEY"))
+        logging.info("Startup: backend=%s, model=%s, api_key_present=%s", backend, model_name, api_present)
     else:
         logging.info("Startup: backend=%s (custom), model_key=%s", provider_startup, model_key_startup)
 

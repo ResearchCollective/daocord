@@ -39,8 +39,14 @@ class GDocsCache:
         export_mime: "text/markdown"
 
     Credentials:
-      - Prefer GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON) or GOOGLE_SERVICE_ACCOUNT_JSON_B64 (base64-encoded)
-      - Or GOOGLE_APPLICATION_CREDENTIALS (path to service account json), typical for servers
+      - Preferred: provide raw JSON via env var. You can set gdocs.google_application_credentials to one of:
+          * "ENV:VARNAME"  -> read JSON from env var VARNAME
+          * "VARNAME"      -> read JSON from env var VARNAME
+        If that is not provided, we also check standard envs:
+          * GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON)
+          * GOOGLE_SERVICE_ACCOUNT_JSON_B64 (base64-encoded JSON)
+          * GOOGLE_APPLICATION_CREDENTIALS (path to json file)
+      - File path in config is still supported, but env JSON takes precedence.
       - The Drive folder must be shared with the service account email
     """
 
@@ -148,7 +154,75 @@ class GDocsCache:
 
     # ---------- Internals ----------
     def _load_credentials(self):
-        # Priority: config path, JSON env, base64 JSON env, path env
+        # Priority: inline JSON in config (possibly via $VAR expansion), config-specified env JSON, standard env JSON,
+        #           base64 env, env path, then config file path
+        # 0) If config value itself looks like JSON (e.g., $VAR expanded to JSON), parse it directly
+        if self.cred_path_cfg:
+            cfg_val = str(self.cred_path_cfg).strip()
+            try:
+                if (cfg_val.startswith("{") and cfg_val.endswith("}")) or (cfg_val.startswith("[") and cfg_val.endswith("]")):
+                    info = json.loads(cfg_val)
+                    logging.info("[gdocs] using credentials from inline JSON in config (possibly expanded from $VAR)")
+                    return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception:
+                # Not valid JSON inline; continue to other methods
+                pass
+
+        # 1) If config provides an env var name, read JSON from it
+        if self.cred_path_cfg:
+            env_name = None
+            if cfg_val.upper().startswith("ENV:"):
+                env_name = cfg_val.split(":", 1)[1].strip()
+            else:
+                # If it's not a path and matches an env var, treat as env var name
+                maybe_path = Path(cfg_val)
+                if not (cfg_val.startswith("/") or ":\\" in cfg_val or maybe_path.exists()):
+                    env_name = cfg_val
+            if env_name:
+                env_val = os.environ.get(env_name)
+                if env_val:
+                    try:
+                        from json import loads
+                        info = loads(env_val)
+                        logging.info("[gdocs] using credentials JSON from env var '%s' (as specified in config)", env_name)
+                        return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+                    except Exception:
+                        logging.exception("[gdocs] failed parsing JSON from env var '%s'", env_name)
+                else:
+                    logging.warning("[gdocs] env var '%s' specified in config is not set", env_name)
+
+        # 2) Standard envs
+        raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+        if raw_json:
+            try:
+                from json import loads
+                info = loads(raw_json)
+                logging.info("[gdocs] using credentials from GOOGLE_SERVICE_ACCOUNT_JSON")
+                return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception:
+                logging.exception("[gdocs] failed parsing GOOGLE_SERVICE_ACCOUNT_JSON")
+
+        b64_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON_B64")
+        if b64_json:
+            try:
+                import base64, json as _json
+                data = base64.b64decode(b64_json)
+                info = _json.loads(data)
+                logging.info("[gdocs] using credentials from GOOGLE_SERVICE_ACCOUNT_JSON_B64")
+                return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception:
+                logging.exception("[gdocs] failed parsing GOOGLE_SERVICE_ACCOUNT_JSON_B64")
+
+        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if cred_path:
+            p = Path(cred_path)
+            if p.exists():
+                logging.info("[gdocs] using credentials from GOOGLE_APPLICATION_CREDENTIALS path: %s", cred_path)
+                return service_account.Credentials.from_service_account_file(cred_path, scopes=SCOPES)
+            else:
+                logging.warning("[gdocs] GOOGLE_APPLICATION_CREDENTIALS path does not exist: %s", cred_path)
+
+        # 3) Finally, allow config to specify a file path after env options
         if self.cred_path_cfg:
             p = Path(self.cred_path_cfg)
             if not p.is_absolute():
@@ -158,22 +232,8 @@ class GDocsCache:
                 return service_account.Credentials.from_service_account_file(str(p), scopes=SCOPES)
             else:
                 logging.warning("[gdocs] config credential path not found: %s", str(p))
-        raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-        b64_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON_B64")
-        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
-        if raw_json:
-            from json import loads
-            info = loads(raw_json)
-            return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-        if b64_json:
-            import base64, json as _json
-            data = base64.b64decode(b64_json)
-            info = _json.loads(data)
-            return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-        if cred_path:
-            return service_account.Credentials.from_service_account_file(cred_path, scopes=SCOPES)
-        raise RuntimeError("No Google credentials found in env: set GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICE_ACCOUNT_JSON_B64, or GOOGLE_APPLICATION_CREDENTIALS")
+        raise RuntimeError("No Google credentials found. Provide JSON in an env var (set gdocs.google_application_credentials to ENV:YOUR_VAR), or set GOOGLE_SERVICE_ACCOUNT_JSON / _B64, or GOOGLE_APPLICATION_CREDENTIALS path.")
 
     def _list_folder_docs(self, service, folder_id: str, max_files: int):
         # Query to list files within folder (non-trashed), recurse by iterating children using 'q' on 'parents'
