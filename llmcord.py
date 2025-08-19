@@ -22,6 +22,7 @@ from tools.gdocs_cache import GDocsCache
 from aiohttp import client_exceptions
 import os
 from pathlib import Path
+import socket
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,13 +102,46 @@ try:
     gdocs_cache = GDocsCache(config)
 except Exception:
     logging.exception("[gdocs] failed to initialize; continuing without gdocs")
-    class _NullGDocs:
-        enabled = False
-        def refresh(self):
-            return
-        def top_with_scores(self, *a, **k):
-            return []
-    gdocs_cache = _NullGDocs()
+
+# --- Masked env diagnostics ---
+def _mask_info(name: str, val: Any) -> None:
+    try:
+        if val is None:
+            status = "MISSING"
+        else:
+            s = str(val)
+            if s.startswith("$") or ("${" in s):
+                status = "UNSET_PLACEHOLDER"
+            elif (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                # Likely inline JSON (e.g., expanded from $VAR containing JSON)
+                status = f"INLINE_JSON(len={len(s)})"
+            else:
+                prefix = s[:2]
+                status = f"SET({prefix}..., len={len(s)})"
+        logging.info("[env] %s: %s", name, status)
+    except Exception:
+        logging.exception("[env] failed to log %s", name)
+    
+def _cfg_get(path: str, default: Any = None) -> Any:
+    """Fetch nested value from global config by dot path."""
+    try:
+        cur: Any = config
+        for part in path.split("."):
+            if isinstance(cur, dict) and part in cur:
+                cur = cur[part]
+            else:
+                return default
+        return cur
+    except Exception:
+        return default
+
+# Log key config/env resolution statuses at startup
+_mask_info("bot_token", _cfg_get("bot_token"))
+_mask_info("client_id", _cfg_get("client_id"))
+_mask_info("providers.anthropic.api_key", _cfg_get("providers.anthropic.api_key"))
+_mask_info("providers.google.api_key", _cfg_get("providers.google.api_key"))
+_mask_info("gdocs.google_application_credentials", _cfg_get("gdocs.google_application_credentials"))
+_mask_info("gdocs.folder_id", _cfg_get("gdocs.folder_id"))
 
 class ReportsCache:
     """Lightweight indexer over markdown reports in a directory."""
