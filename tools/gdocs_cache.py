@@ -160,6 +160,9 @@ class GDocsCache:
         if self.cred_path_cfg:
             cfg_val = str(self.cred_path_cfg)
             s = cfg_val.strip()
+            # If value is quoted (e.g., ' {...} '), strip matching quotes first
+            if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+                s = s[1:-1].strip()
             # Try whole-string JSON first
             try:
                 if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
@@ -167,18 +170,19 @@ class GDocsCache:
                     logging.info("[gdocs] using credentials from inline JSON in config (possibly expanded from $VAR)")
                     return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
             except Exception:
-                # Try extracting the largest {...} region and parse that
-                try:
-                    if "{" in s and "}" in s:
-                        i = s.find("{")
-                        j = s.rfind("}")
-                        if i != -1 and j != -1 and j > i:
-                            inner = s[i:j+1]
-                            info = json.loads(inner)
-                            logging.info("[gdocs] using credentials from embedded JSON in config value")
-                            return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-                except Exception:
-                    pass
+                pass
+            # If not a clean JSON string, try extracting the largest {...} region and parse that
+            try:
+                if "{" in s and "}" in s:
+                    i = s.find("{")
+                    j = s.rfind("}")
+                    if i != -1 and j != -1 and j > i:
+                        inner = s[i:j+1]
+                        info = json.loads(inner)
+                        logging.info("[gdocs] using credentials from embedded JSON in config value")
+                        return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception:
+                pass
 
         # 1) If config provides an env var name, read JSON from it
         if self.cred_path_cfg:
@@ -206,7 +210,7 @@ class GDocsCache:
                     short = (env_name[:32] + "…") if len(env_name) > 40 else env_name
                     logging.warning("[gdocs] env var '%s' specified in config is not set", short)
 
-        # 2) Standard envs
+        # 2) Standard envs (JSON only; no file paths)
         raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
         if raw_json:
             try:
@@ -228,29 +232,60 @@ class GDocsCache:
             except Exception:
                 logging.exception("[gdocs] failed parsing GOOGLE_SERVICE_ACCOUNT_JSON_B64")
 
-        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        if cred_path:
-            p = Path(cred_path)
-            if p.exists():
-                logging.info("[gdocs] using credentials from GOOGLE_APPLICATION_CREDENTIALS path: %s", cred_path)
-                return service_account.Credentials.from_service_account_file(cred_path, scopes=SCOPES)
-            else:
-                short = (cred_path[:32] + "…") if len(cred_path) > 40 else cred_path
-                logging.warning("[gdocs] GOOGLE_APPLICATION_CREDENTIALS path does not exist: %s", short)
+        cred_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if cred_env:
+            # Treat strictly as JSON; never as a file path
+            s = cred_env.strip()
+            if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+                s = s[1:-1].strip()
+            try:
+                if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                    info = json.loads(s)
+                    logging.info("[gdocs] using credentials from inline JSON in GOOGLE_APPLICATION_CREDENTIALS")
+                    return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception:
+                pass
+            try:
+                if "{" in s and "}" in s:
+                    i = s.find("{")
+                    j = s.rfind("}")
+                    if i != -1 and j != -1 and j > i:
+                        inner = s[i:j+1]
+                        info = json.loads(inner)
+                        logging.info("[gdocs] using credentials from embedded JSON in GOOGLE_APPLICATION_CREDENTIALS")
+                        return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception:
+                pass
+            short = (s[:32] + "…") if len(s) > 40 else s
+            logging.warning("[gdocs] GOOGLE_APPLICATION_CREDENTIALS provided but not valid JSON; ignoring (val=%s)", short)
 
-        # 3) Finally, allow config to specify a file path after env options
+        # 3) Do NOT allow file paths from config; JSON-only policy
         if self.cred_path_cfg:
-            p = Path(str(self.cred_path_cfg))
-            if not p.is_absolute():
-                p = Path.cwd() / p
-            if p.exists():
-                logging.info("[gdocs] using credentials from config path: %s", str(p))
-                return service_account.Credentials.from_service_account_file(str(p), scopes=SCOPES)
-            else:
-                short = (str(p)[:32] + "…") if len(str(p)) > 40 else str(p)
-                logging.warning("[gdocs] config credential path not found: %s", short)
+            s = str(self.cred_path_cfg).strip()
+            if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+                s = s[1:-1].strip()
+            try:
+                if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+                    info = json.loads(s)
+                    logging.info("[gdocs] using credentials from inline JSON in config")
+                    return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception:
+                pass
+            try:
+                if "{" in s and "}" in s:
+                    i = s.find("{")
+                    j = s.rfind("}")
+                    if i != -1 and j != -1 and j > i:
+                        inner = s[i:j+1]
+                        info = json.loads(inner)
+                        logging.info("[gdocs] using credentials from embedded JSON in config value")
+                        return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception:
+                pass
+            short = (s[:32] + "…") if len(s) > 40 else s
+            logging.warning("[gdocs] config google_application_credentials is not valid JSON; file paths are disabled (val=%s)", short)
 
-        raise RuntimeError("No Google credentials found. Provide JSON in an env var (set gdocs.google_application_credentials to ENV:YOUR_VAR), or set GOOGLE_SERVICE_ACCOUNT_JSON / _B64, or GOOGLE_APPLICATION_CREDENTIALS path.")
+        raise RuntimeError("No Google credentials found. Provide JSON via env var only: set gdocs.google_application_credentials to ENV:YOUR_VAR or $YOUR_VAR, or set GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_JSON_B64 / GOOGLE_APPLICATION_CREDENTIALS to pure JSON.")
 
     def _list_folder_docs(self, service, folder_id: str, max_files: int):
         # Query to list files within folder (non-trashed), recurse by iterating children using 'q' on 'parents'

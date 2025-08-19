@@ -126,7 +126,7 @@ providers:
     base_url: http://localhost:8000/v1
 
 models:
-  anthropic/claude-3-5-sonnet: {}
+  anthropic/claude-3-5-sonnet-20240620: {}
   google/gemini-2.5-flash: {}
   google/gemini-2.5-pro: 
     reasoning_effort: high
