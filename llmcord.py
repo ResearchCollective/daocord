@@ -800,7 +800,65 @@ async def on_message(new_msg: discord.Message) -> None:
                         messages=anth_messages,
                     )
 
-                resp = await asyncio.to_thread(_gen_anthropic)
+                # Call Anthropic with retry/backoff on 429 rate limits
+                resp = None
+                max_retries = 3
+                base_delay = 3  # seconds
+                for attempt in range(max_retries):
+                    try:
+                        resp = await asyncio.to_thread(_gen_anthropic)
+                        break
+                    except Exception as e:
+                        # Handle Anthropic SDK RateLimitError gracefully
+                        is_rate_limit = False
+                        try:
+                            is_rate_limit = (anthropic is not None) and isinstance(e, getattr(anthropic, "RateLimitError", Exception))
+                        except Exception:
+                            is_rate_limit = False
+                        if is_rate_limit and attempt < max_retries - 1:
+                            delay = base_delay * (2 ** attempt)
+                            msg = f"Rate limited by Anthropic. Retrying in {delay}s…"
+                            try:
+                                if use_plain_responses:
+                                    notice_msg = await new_msg.reply(content=msg, suppress_embeds=True)
+                                    response_msgs.append(notice_msg)
+                                    msg_nodes[notice_msg.id] = MsgNode(parent_msg=new_msg)
+                                    await msg_nodes[notice_msg.id].lock.acquire()
+                                else:
+                                    embed_rl = discord.Embed(description=msg, color=EMBED_COLOR_INCOMPLETE)
+                                    notice_msg = await new_msg.reply(embed=embed_rl, silent=True)
+                                    response_msgs.append(notice_msg)
+                                    msg_nodes[notice_msg.id] = MsgNode(parent_msg=new_msg)
+                                    await msg_nodes[notice_msg.id].lock.acquire()
+                            except Exception:
+                                logging.exception("Failed to send rate limit notice (Anthropic)")
+                            await asyncio.sleep(delay)
+                            continue
+                        # Not a rate limit or out of retries -> re-raise
+                        raise
+
+                # If still no response after retries, notify user and stop this path
+                if resp is None:
+                    final_msg = (
+                        "Still rate limited by Anthropic after multiple retries. "
+                        "Please wait a bit and try again."
+                    )
+                    try:
+                        if use_plain_responses:
+                            notice_msg = await new_msg.reply(content=final_msg, suppress_embeds=True)
+                            response_msgs.append(notice_msg)
+                            msg_nodes[notice_msg.id] = MsgNode(parent_msg=new_msg)
+                            await msg_nodes[notice_msg.id].lock.acquire()
+                        else:
+                            embed_rl = discord.Embed(description=final_msg, color=EMBED_COLOR_COMPLETE)
+                            notice_msg = await new_msg.reply(embed=embed_rl, silent=True)
+                            response_msgs.append(notice_msg)
+                            msg_nodes[notice_msg.id] = MsgNode(parent_msg=new_msg)
+                            await msg_nodes[notice_msg.id].lock.acquire()
+                    except Exception:
+                        logging.exception("Failed to send final rate limit notice (Anthropic)")
+                    return
+
                 # Extract text from content blocks
                 a_text = ""
                 try:
