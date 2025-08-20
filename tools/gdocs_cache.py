@@ -60,6 +60,10 @@ class GDocsCache:
         self.export_mime = gcfg.get("export_mime") or DEFAULT_EXPORT_MIME
         # Optional credential path from config
         self.cred_path_cfg = gcfg.get("google_application_credentials")
+        # Optional split-field credentials from config (already env-expanded by get_config)
+        # Expected keys may include: project_id, private_key_id, private_key, client_email, client_id,
+        # auth_uri, token_uri, auth_provider_x509_cert_url, client_x509_cert_url
+        self.cred_fields = gcfg.get("credentials") or {}
 
         self.state_path = self.cache_dir / "state.json"
         self.state = {"last_sync": 0, "files": {}}  # fileId -> {modifiedTime, title, path}
@@ -284,6 +288,55 @@ class GDocsCache:
                 pass
             short = (s[:32] + "…") if len(s) > 40 else s
             logging.warning("[gdocs] config google_application_credentials is not valid JSON; file paths are disabled (val=%s)", short)
+
+        # 4) Split-field credentials under gdocs.credentials
+        if isinstance(self.cred_fields, dict) and self.cred_fields:
+            try:
+                fields = dict(self.cred_fields)  # shallow copy
+                # Normalize private_key: turn literal \n into newlines
+                pk = fields.get("private_key")
+                if pk:
+                    # If the value contains literal backslash-n, replace with actual newline
+                    if "\\n" in pk and "\n" not in pk:
+                        pk = pk.replace("\\n", "\n")
+                    # Ensure PEM has proper header/footer lines
+                    if "BEGIN PRIVATE KEY" in pk and not pk.strip().startswith("-----BEGIN PRIVATE KEY-----"):
+                        pk = pk.replace("-----BEGIN PRIVATE KEY-----", "\n-----BEGIN PRIVATE KEY-----\n").replace("-----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----\n")
+                    fields["private_key"] = pk
+
+                # Build info dict with sensible defaults
+                info = {
+                    "type": fields.get("type") or "service_account",
+                }
+                # Copy known fields if present
+                for k in (
+                    "project_id",
+                    "private_key_id",
+                    "private_key",
+                    "client_email",
+                    "client_id",
+                    "auth_uri",
+                    "token_uri",
+                    "auth_provider_x509_cert_url",
+                    "client_x509_cert_url",
+                ):
+                    if fields.get(k) not in (None, ""):
+                        info[k] = fields[k]
+
+                # Defaults commonly used by Google service accounts
+                info.setdefault("auth_uri", "https://accounts.google.com/o/oauth2/auth")
+                info.setdefault("token_uri", "https://oauth2.googleapis.com/token")
+                info.setdefault("auth_provider_x509_cert_url", "https://www.googleapis.com/oauth2/v1/certs")
+
+                # Minimal required keys to proceed
+                if not info.get("private_key") or not info.get("client_email"):
+                    missing = [k for k in ("private_key", "client_email") if not info.get(k)]
+                    logging.warning("[gdocs] split credentials missing required: %s", ", ".join(missing))
+                else:
+                    logging.info("[gdocs] using credentials from gdocs.credentials split fields")
+                    return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception:
+                logging.exception("[gdocs] failed building credentials from split fields")
 
         raise RuntimeError("No Google credentials found. Provide JSON via env var only: set gdocs.google_application_credentials to ENV:YOUR_VAR or $YOUR_VAR, or set GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_JSON_B64 / GOOGLE_APPLICATION_CREDENTIALS to pure JSON.")
 
