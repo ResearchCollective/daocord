@@ -320,5 +320,78 @@ def main(argv: Optional[List[str]] = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def monitor_twitter(
+    config: Dict[str, Any],
+    save_events: bool = True,
+    use_cache: bool = True,
+) -> List[Dict[str, Any]]:
+    """Monitor Twitter based on simple configuration.
+
+    Args:
+        config: Configuration dictionary
+        save_events: Whether to save event bundles to disk
+        use_cache: Whether to use search cache
+
+    Returns:
+        List of monitor reports
+    """
+    from .x_search import _cfg_cache_settings as cfg_cache_settings, _ensure_dir as ensure_dir
+
+    # Get simple configuration
+    tw_cfg = (config or {}).get("twitter", {}) or {}
+
+    # Build queries from configuration
+    keywords = tw_cfg.get("keywords", ["longevity"])
+    users = tw_cfg.get("users", [])
+    exclude_keywords = tw_cfg.get("exclude_keywords", [])
+
+    # Build combined query
+    query_parts = []
+
+    # Add keywords
+    if keywords:
+        keyword_query = " OR ".join(keywords)
+        query_parts.append(f"({keyword_query})")
+
+    # Add user queries
+    if users:
+        user_queries = [f"from:{user}" for user in users]
+        user_query = " OR ".join(user_queries)
+        query_parts.append(f"({user_query})")
+
+    if not query_parts:
+        return []
+
+    final_query = " OR ".join(query_parts)
+    final_query += " -is:retweet -is:reply lang:en"
+
+    # Get other configuration
+    search_limit = tw_cfg.get("search_limit", 15)
+    since_days = tw_cfg.get("since_days", 7)
+
+    # Create a simple monitor config
+    monitor_config = {
+        "name": "twitter-monitor",
+        "query": final_query,
+        "lang": "en",
+        "search_limit": search_limit,
+        "since_days": since_days,
+        "filters": tw_cfg.get("filters", {}),
+        "bundle": tw_cfg.get("bundle", {})
+    }
+
+    # Run the monitor
+    try:
+        report = run_monitor(
+            monitor_config,
+            config_path="",  # Use the passed config
+            dry_run=False,
+            max_events=None,
+            use_cache=use_cache,
+            save_events=save_events,
+            events_dir="data/x/events",
+        )
+        return [report]
+    except Exception as e:
+        print(f"Error running Twitter monitor: {e}")
+        return []

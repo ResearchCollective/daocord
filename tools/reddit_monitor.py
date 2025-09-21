@@ -118,6 +118,7 @@ def run_monitor(
     save_events: bool = False,
     events_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Run a single monitor definition and return a report."""
     name = monitor.get("name") or "reddit-monitor"
     subs = monitor.get("subreddits") or monitor.get("subs") or []
     if isinstance(subs, str):
@@ -126,6 +127,11 @@ def run_monitor(
     limit_per_sub = int(monitor.get("limit_per_sub", 25))
     keywords = monitor.get("keywords")  # list[str] optional
     filters = monitor.get("filters", {}) or {}
+
+    # Get config for exclude_keywords
+    cfg = load_config(config_path)
+    rd_cfg = (cfg or {}).get("reddit", {}) or {}
+    exclude_keywords = rd_cfg.get("exclude_keywords", [])
 
     # Search recent posts per subreddit
     results = search_reddit(
@@ -136,6 +142,15 @@ def run_monitor(
         config_path=config_path,
         use_cache=use_cache,
     )
+
+    # Apply exclude_keywords filtering if specified
+    if exclude_keywords:
+        filtered_results = []
+        for result in results:
+            text = f"{result.get('title') or ''}\n{result.get('selftext') or ''}".lower()
+            if not any(exclude_kw.lower() in text for exclude_kw in exclude_keywords):
+                filtered_results.append(result)
+        results = filtered_results
 
     # Filter and cap
     passed: List[Dict[str, Any]] = [r for r in results if _passes_filters(r, filters)]
@@ -267,5 +282,53 @@ def main(argv: Optional[List[str]] = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def monitor_reddit(
+    config: Dict[str, Any],
+    save_events: bool = True,
+    use_cache: bool = True,
+) -> List[Dict[str, Any]]:
+    """Monitor Reddit based on simple configuration.
+
+    Args:
+        config: Configuration dictionary
+        save_events: Whether to save event bundles to disk
+        use_cache: Whether to use search cache
+
+    Returns:
+        List of monitor reports
+    """
+    # Get simple configuration
+    rd_cfg = (config or {}).get("reddit", {}) or {}
+
+    # Build monitor config from simple configuration
+    subreddits = rd_cfg.get("subreddits", ["all"])
+    keywords = rd_cfg.get("keywords", [])
+    exclude_keywords = rd_cfg.get("exclude_keywords", [])
+
+    # Create a simple monitor config
+    monitor_config = {
+        "name": "reddit-monitor",
+        "subreddits": subreddits,
+        "keywords": keywords,
+        "lang": "en",
+        "search_limit": rd_cfg.get("search_limit", 15),
+        "since_days": rd_cfg.get("since_days", 7),
+        "filters": rd_cfg.get("filters", {}),
+        "bundle": rd_cfg.get("bundle", {})
+    }
+
+    # Run the monitor
+    try:
+        report = run_monitor(
+            monitor_config,
+            config_path="",  # Use the passed config
+            dry_run=False,
+            max_events=None,
+            use_cache=use_cache,
+            save_events=save_events,
+            events_dir="data/reddit/events",
+        )
+        return [report]
+    except Exception as e:
+        print(f"Error running Reddit monitor: {e}")
+        return []

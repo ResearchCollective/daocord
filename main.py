@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import logging
 from typing import Any, Literal, Optional
-import io
 
 import discord
 from discord.app_commands import Choice
@@ -55,19 +54,56 @@ except Exception:
 VISION_MODEL_TAGS = ("claude", "gemini", "gemma", "gpt-4", "gpt-5", "grok-4", "llama", "llava", "mistral", "o3", "o4", "vision", "vl")
 PROVIDERS_SUPPORTING_USERNAMES = ("openai", "x-ai")
 
-EMBED_COLOR_COMPLETE = discord.Color.dark_green()
-EMBED_COLOR_INCOMPLETE = discord.Color.orange()
-
+# Discord streaming indicator
 STREAMING_INDICATOR = " "
 EDIT_DELAY_SECONDS = 1
 
 MAX_MESSAGE_NODES = 500
 
+# Discord embed colors
+EMBED_COLOR_COMPLETE = discord.Color.dark_green()
+EMBED_COLOR_INCOMPLETE = discord.Color.orange()
 
-def get_config(filename: str = "config.yaml") -> dict[str, Any]:
-    """Load YAML config and expand environment variables in all string values.
-    Supports $VAR and ${VAR} patterns anywhere in the string.
-    """
+# Add detailed Discord error logging
+import discord.http
+original_request = discord.http.HTTPClient.request
+
+async def debug_request(self, route, **kwargs):
+    """Debug version of Discord HTTP request to log full responses"""
+    try:
+        # logging.info(f"🔗 Discord API Request: {route.method} {route.path}")
+        response = await original_request(self, route, **kwargs)
+
+        # Log successful responses
+        # if hasattr(response, 'status'):
+        #     logging.info(f"✅ Discord API Response: {response.status} {route.method} {route.path}")
+        # else:
+        #     logging.info(f"✅ Discord API Response: Success {route.method} {route.path}")
+
+        return response
+
+    except discord.HTTPException as e:
+        logging.error(f"❌ Discord API Error: {e.status} {e.code} - {e.text}")
+        logging.error(f"   Method: {route.method}")
+        logging.error(f"   Path: {route.path}")
+        logging.error(f"   Full response: {e.response}")
+        if hasattr(e, 'json') and e.json:
+            logging.error(f"   JSON response: {e.json}")
+        raise
+    except Exception as e:
+        logging.error(f"❌ Discord API Exception: {type(e).__name__}: {e}")
+        logging.error(f"   Method: {route.method}")
+        logging.error(f"   Path: {route.path}")
+        raise
+
+# Monkey patch the HTTP client
+discord.http.HTTPClient.request = debug_request
+
+
+def get_config(filename: str = "config.yaml") -> dict:
+    """Load config from YAML file with environment variable expansion."""
+    import os
+
     with open(filename, encoding="utf-8") as file:
         raw = yaml.safe_load(file)
 
@@ -78,10 +114,98 @@ def get_config(filename: str = "config.yaml") -> dict[str, Any]:
             return [_expand(v) for v in obj]
         if isinstance(obj, str):
             # Expand $VARS inside strings; leaves unknown vars unchanged
-            return os.path.expandvars(obj)
+            expanded = os.path.expandvars(obj)
+            return expanded
         return obj
 
-    return _expand(raw)
+    expanded_config = _expand(raw)
+
+    # Debug: Show config loading details
+    # logging.info("📋 Config loading debug:")
+    # logging.info(f"   Raw config keys: {list(raw.keys())}")
+    # logging.info(f"   Environment variables available: {list(os.environ.keys())}")
+
+    # Show bot token specifically
+    bot_token_raw = raw.get("bot_token", "")
+    bot_token_expanded = expanded_config.get("bot_token", "")
+    # logging.info(f"   Bot token - Raw: {bot_token_raw}")
+    # logging.info(f"   Bot token - Expanded: {bot_token_expanded[:20]}... (length: {len(bot_token_expanded)})")
+
+    if bot_token_expanded.startswith('$'):
+        logging.warning(f"⚠️  Bot token still contains unexpanded variable: {bot_token_expanded}")
+        logging.warning("   Available env vars with 'TOKEN': " +
+                       ", ".join([k for k in os.environ.keys() if 'TOKEN' in k.upper()]))
+
+    return expanded_config
+
+
+def load_system_prompt() -> str:
+    """Load system prompt from multiple sources with priority order:
+    1. Multi-line env var: SYSTEM_PROMPT_DAOCORD (Railway-friendly)
+    2. Base64 encoded env var: SYSTEM_PROMPT_DAOCORD_B64 (fallback)
+    3. File: config.get("system_prompt_file") (if specified and file exists)
+    4. File: system_prompt.txt (default fallback)
+    5. Raise error if nothing found
+    """
+    import base64
+
+    config_obj = get_config()
+
+    logging.info("🔍 System prompt loading debug:")
+    logging.info(f"   Checking SYSTEM_PROMPT_DAOCORD: {'✅ Set' if os.getenv('SYSTEM_PROMPT_DAOCORD') else '❌ Not set'}")
+    logging.info(f"   Checking SYSTEM_PROMPT_DAOCORD_B64: {'✅ Set' if os.getenv('SYSTEM_PROMPT_DAOCORD_B64') else '❌ Not set'}")
+
+    # Try multi-line environment variable first (Railway-friendly)
+    env_prompt = os.getenv("SYSTEM_PROMPT_DAOCORD", "").strip()
+    if env_prompt:
+        logging.info(f"   ✅ Found system prompt via SYSTEM_PROMPT_DAOCORD ({len(env_prompt)} chars)")
+        return env_prompt
+
+    # Try base64 encoded environment variable (fallback)
+    b64_prompt = os.getenv("SYSTEM_PROMPT_DAOCORD_B64", "").strip()
+    if b64_prompt:
+        try:
+            decoded = base64.b64decode(b64_prompt).decode('utf-8')
+            if decoded.strip():
+                logging.info(f"   ✅ Found system prompt via SYSTEM_PROMPT_DAOCORD_B64 ({len(decoded)} chars)")
+                return decoded.strip()
+        except Exception as e:
+            logging.warning(f"   ❌ Failed to decode base64 system prompt: {e}")
+
+    # Try to load from configured file first
+    prompt_file_path = config_obj.get("system_prompt_file")
+    if prompt_file_path:
+        prompt_file = Path(prompt_file_path)
+        logging.info(f"   Checking configured prompt file: {prompt_file_path} - {'✅ Exists' if prompt_file.exists() else '❌ Not found'}")
+        if prompt_file.exists():
+            try:
+                with open(prompt_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    logging.info(f"   ✅ Found system prompt in configured file ({len(content)} chars)")
+                    return content
+            except Exception as e:
+                logging.warning(f"   ❌ Failed to load system prompt from {prompt_file}: {e}")
+
+    # Try to load from default file
+    default_prompt_file = Path("system_prompt.txt")
+    logging.info(f"   Checking default prompt file: system_prompt.txt - {'✅ Exists' if default_prompt_file.exists() else '❌ Not found'}")
+    if default_prompt_file.exists():
+        try:
+            with open(default_prompt_file, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                logging.info(f"   ✅ Found system prompt in default file ({len(content)} chars)")
+                return content
+        except Exception as e:
+            logging.warning(f"   ❌ Failed to load system prompt from default file: {e}")
+
+    # No fallback - require explicit configuration
+    logging.error("❌ No system prompt found!")
+    logging.error("   Available options:")
+    logging.error("   1. Set SYSTEM_PROMPT_DAOCORD environment variable")
+    logging.error("   2. Set SYSTEM_PROMPT_DAOCORD_B64 environment variable (base64)")
+    logging.error("   3. Create system_prompt.txt file")
+    logging.error("   4. Configure system_prompt_file in config.yaml")
+    raise ValueError("No system prompt found. Set SYSTEM_PROMPT_DAOCORD environment variable or create system_prompt.txt file.")
 
 
 config = get_config()
@@ -95,6 +219,19 @@ intents.message_content = True
 activity = discord.CustomActivity(name=(config["status_message"] or "github.com/jakobdylanc/llmcord")[:128])
 discord_bot = commands.Bot(intents=intents, activity=activity, command_prefix=None)
 
+# Enable all Discord logging for maximum verbosity
+discord_logger = logging.getLogger('discord')
+discord_logger.setLevel(logging.INFO)
+
+# Also enable HTTP client logging
+http_logger = logging.getLogger('discord.http')
+http_logger.setLevel(logging.INFO)
+
+logging.info("🤖 Discord bot client created successfully")
+logging.info(f"   Intents: {intents}")
+logging.info(f"   Activity: {activity}")
+logging.info(f"   Command prefix: {discord_bot.command_prefix}")
+
 httpx_client = httpx.AsyncClient()
 dao_docs = DAODocsTool()
 # Initialize optional Google Docs cache (no-op if disabled in config)
@@ -102,101 +239,6 @@ try:
     gdocs_cache = GDocsCache(config)
 except Exception:
     logging.exception("[gdocs] failed to initialize; continuing without gdocs")
-
-# --- Masked env diagnostics ---
-def _mask_info(name: str, val: Any) -> None:
-    try:
-        if val is None:
-            status = "MISSING"
-        else:
-            s = str(val)
-            if s.startswith("$") or ("${" in s):
-                status = "UNSET_PLACEHOLDER"
-            elif (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
-                # Likely inline JSON (e.g., expanded from $VAR containing JSON)
-                status = f"INLINE_JSON(len={len(s)})"
-            else:
-                prefix = s[:2]
-                status = f"SET({prefix}..., len={len(s)})"
-        logging.info("[env] %s: %s", name, status)
-    except Exception:
-        logging.exception("[env] failed to log %s", name)
-    
-def _cfg_get(path: str, default: Any = None) -> Any:
-    """Fetch nested value from global config by dot path."""
-    try:
-        cur: Any = config
-        for part in path.split("."):
-            if isinstance(cur, dict) and part in cur:
-                cur = cur[part]
-            else:
-                return default
-        return cur
-    except Exception:
-        return default
-
-# Log key config/env resolution statuses at startup
-_mask_info("bot_token", _cfg_get("bot_token"))
-_mask_info("client_id", _cfg_get("client_id"))
-_mask_info("providers.anthropic.api_key", _cfg_get("providers.anthropic.api_key"))
-_mask_info("providers.google.api_key", _cfg_get("providers.google.api_key"))
-_mask_info("gdocs.google_application_credentials", _cfg_get("gdocs.google_application_credentials"))
-_mask_info("gdocs.folder_id", _cfg_get("gdocs.folder_id"))
-
-class ReportsCache:
-    """Lightweight indexer over markdown reports in a directory."""
-    def __init__(self, reports_dir: Path | str = "reports") -> None:
-        self.dir = Path(reports_dir)
-        self.enabled = self.dir.exists()
-        self.entries: list[tuple[Path, str, float]] = []  # (path, text, mtime)
-
-    def refresh(self) -> None:
-        try:
-            self.enabled = self.dir.exists()
-            self.entries = []
-            if not self.enabled:
-                return
-            for p in sorted(self.dir.glob("**/*.md")):
-                try:
-                    txt = p.read_text(encoding="utf-8", errors="ignore")
-                    mtime = p.stat().st_mtime
-                    self.entries.append((p, txt, mtime))
-                except Exception:
-                    logging.exception("[reports] failed reading %s", p)
-        except Exception:
-            logging.exception("[reports] refresh failed")
-
-    def top_with_scores(self, query: str, k: int = 10) -> list[tuple[str, str, float]]:
-        if not self.enabled or not self.entries:
-            return []
-        q = query.lower()
-        terms = [t for t in (''.join(ch if ch.isalnum() else ' ' for ch in q)).split() if len(t) > 2]
-        results: list[tuple[str, str, float]] = []
-        now = datetime.now().timestamp()
-        for path, text, mtime in self.entries:
-            tl = text.lower()
-            term_score = sum(tl.count(t) for t in terms) or 0.0
-            # Recency boost (up to +2.0 within ~14 days)
-            recency_days = max(0.0, (now - mtime) / 86400.0)
-            recency = max(0.0, 2.0 - (recency_days / 7.0))
-            score = term_score + recency
-            if score > 0:
-                # Extract a short snippet around the first strongest term
-                idx = -1
-                for t in terms:
-                    idx = tl.find(t)
-                    if idx != -1:
-                        break
-                start = max(0, idx - 200) if idx != -1 else 0
-                end = min(len(text), (idx + 200)) if idx != -1 else min(len(text), 400)
-                snippet = text[start:end].strip()
-                results.append((str(path), snippet, float(score)))
-        results.sort(key=lambda x: x[2], reverse=True)
-        return results[:k]
-
-# Initialize reports cache
-reports_dir = Path(config.get("reports_dir", "reports"))
-reports_cache = ReportsCache(reports_dir)
 
 
 @dataclass
@@ -223,10 +265,6 @@ async def on_ready():
             logging.info("[gdocs] initial refresh on startup…")
             await asyncio.to_thread(gdocs_cache.refresh)
             logging.info("[gdocs] initial refresh complete")
-        # Refresh reports cache as well
-        logging.info("[reports] initial refresh on startup…")
-        await asyncio.to_thread(reports_cache.refresh)
-        logging.info("[reports] initial refresh complete")
     except Exception:
         logging.exception("[gdocs] initial refresh failed")
 
@@ -263,8 +301,10 @@ async def model_autocomplete(interaction: discord.Interaction, curr_str: str) ->
 
 @discord_bot.event
 async def on_ready() -> None:
-    if client_id := config["client_id"]:
-        logging.info(f"\n\nBOT INVITE URL:\nhttps://discord.com/oauth2/authorize?client_id={client_id}&permissions=412317191168&scope=bot\n")
+    # Only show invite URL if we actually need it (bot failed to authenticate)
+    # This is just informational - doesn't mean bot isn't already in server
+    if config.get("client_id"):
+        logging.info(f"🔗 Bot Invite URL (if needed): https://discord.com/oauth2/authorize?client_id={config['client_id']}&permissions=412317191168&scope=bot")
 
     await discord_bot.tree.sync()
 
@@ -351,8 +391,7 @@ async def on_message(new_msg: discord.Message) -> None:
     if lower.startswith("!dao refresh"):
         try:
             await asyncio.to_thread(dao_docs.refresh)
-            await asyncio.to_thread(reports_cache.refresh)
-            await new_msg.reply("DAO docs and reports refreshed.", suppress_embeds=True, silent=True)
+            await new_msg.reply("DAO docs refreshed.", suppress_embeds=True, silent=True)
         except Exception as e:
             await new_msg.reply(f"Failed to refresh docs: {e}", suppress_embeds=True, silent=True)
         return
@@ -368,9 +407,34 @@ async def on_message(new_msg: discord.Message) -> None:
     # else:
     #     user_query = content_stripped
 
-    # Always use the first model from config at message time (config is reloaded above)
-    provider_slash_model = next(iter(config.get("models", {}) or {"openai/gpt-4o-mini": {}}))
-    provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
+    # Use the NEW explicit primary provider configuration (preferred)
+    primary_provider = config.get("primary_provider")
+    primary_model = config.get("primary_model")
+
+    if primary_provider and primary_model:
+        logging.info("📋 Using NEW explicit primary provider configuration:")
+        logging.info(f"   Primary Provider: {primary_provider}")
+        logging.info(f"   Primary Model: {primary_model}")
+
+        provider = primary_provider
+        model = primary_model
+        model_name = f"{primary_provider}/{primary_model}"
+        first_model = {"provider": primary_provider, "model": primary_model}
+    else:
+        # Fall back to OLD model list format for compatibility
+        logging.info("Using OLD model list format (deprecated):")
+        first_model = next(iter(config.get("models", [])), None)
+        if first_model is None:
+            raise ValueError("No models configured in config.yaml")
+
+        provider = first_model.get("provider", "openai")
+        model = first_model.get("model", "gpt-4o-mini")
+        model_name = first_model.get("name", f"{provider}/{model}")
+
+        logging.info(f"   Provider: {provider}")
+        logging.info(f"   Model: {model}")
+
+    logging.info(f"FINAL: Using provider '{provider}' with model '{model}'")
 
     provider_config = config.get("providers", {}).get(provider, {})
     base_url = provider_config.get("base_url", None)
@@ -390,14 +454,14 @@ async def on_message(new_msg: discord.Message) -> None:
     api_key_present = gemini_api_key is not None
     logging.info(f"api_key_present={api_key_present} (source={'GEMINI_API_KEY' if gemini_api_key == os.getenv('GEMINI_API_KEY') else 'providers.gemini' if gemini_api_key == gem_cfg.get('api_key') else 'providers.google'})")
 
-    model_parameters = config["models"].get(provider_slash_model, None)
+    model_parameters = first_model
 
     extra_headers = provider_config.get("extra_headers", None)
     extra_query = provider_config.get("extra_query", None)
     extra_body = (provider_config.get("extra_body", None) or {}) | (model_parameters or {}) or None
 
-    accept_images = any(x in provider_slash_model.lower() for x in VISION_MODEL_TAGS)
-    accept_usernames = any(x in provider_slash_model.lower() for x in PROVIDERS_SUPPORTING_USERNAMES)
+    accept_images = any(x in model.lower() for x in VISION_MODEL_TAGS)
+    accept_usernames = any(x in model.lower() for x in PROVIDERS_SUPPORTING_USERNAMES) or active_provider in ("openai", "x-ai")
 
     max_text = config.get("max_text", 100000)
     max_images = config.get("max_images", 5) if accept_images else 0
@@ -473,19 +537,34 @@ async def on_message(new_msg: discord.Message) -> None:
                 messages.append(message)
 
             if len(curr_node.text) > max_text:
-                user_warnings.add(f"⚠️ Max {max_text:,} characters per message")
+                user_warnings.add(f"Max {max_text:,} characters per message")
             if len(curr_node.images) > max_images:
-                user_warnings.add(f"⚠️ Max {max_images} image{'' if max_images == 1 else 's'} per message" if max_images > 0 else "⚠️ Can't see images")
+                user_warnings.add(f"Max {max_images} image{'' if max_images == 1 else 's'} per message" if max_images > 0 else "Can't see images")
             if curr_node.has_bad_attachments:
-                user_warnings.add("⚠️ Unsupported attachments")
+                user_warnings.add("Unsupported attachments")
             if curr_node.fetch_parent_failed or (curr_node.parent_msg != None and len(messages) == max_messages):
-                user_warnings.add(f"⚠️ Only using last {len(messages)} message{'' if len(messages) == 1 else 's'}")
+                user_warnings.add(f"Only using last {len(messages)} message{'' if len(messages) == 1 else 's'}")
 
             curr_msg = curr_node.parent_msg
 
     logging.info(f"Message received (user ID: {new_msg.author.id}, attachments: {len(new_msg.attachments)}, conversation length: {len(messages)}):\n{new_msg.content}")
 
-    if system_prompt := config["system_prompt"]:
+    try:
+        system_prompt = load_system_prompt()
+    except ValueError as e:
+        # No system prompt configured - send error message
+        error_msg = f"Configuration Error: {str(e)}\n\nPlease set SYSTEM_PROMPT_DAOCORD environment variable in Railway."
+        if use_plain_responses:
+            response_msg = await new_msg.reply(content=error_msg, suppress_embeds=True)
+        else:
+            embed_err = discord.Embed(description=error_msg, color=0xff0000)
+            response_msg = await new_msg.reply(embed=embed_err, silent=True)
+        response_msgs.append(response_msg)
+        msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
+        await msg_nodes[response_msg.id].lock.acquire()
+        return
+
+    if system_prompt:
         now = datetime.now().astimezone()
 
         system_prompt = system_prompt.replace("{date}", now.strftime("%B %d %Y")).replace("{time}", now.strftime("%H:%M:%S %Z%z")).strip()
@@ -495,7 +574,10 @@ async def on_message(new_msg: discord.Message) -> None:
         messages.append(dict(role="system", content=system_prompt))
 
     # Optional global system prompt from config (avoid duplicates if already present)
-    sys_prompt = (config.get("system_prompt") or "").strip()
+    try:
+        sys_prompt = load_system_prompt().strip()
+    except ValueError:
+        sys_prompt = ""
     if sys_prompt:
         already_has_sys = any((m.get("role") == "system" and m.get("content") == sys_prompt) for m in messages)
         if not already_has_sys:
@@ -508,8 +590,6 @@ async def on_message(new_msg: discord.Message) -> None:
             # Build focused context from top-N relevant chunks across sources
             dao_top = await asyncio.to_thread(dao_docs.top_with_scores, user_query, 8)
             merged = [("dao", p, c, s) for (p, c, s) in dao_top]
-            rep_top = await asyncio.to_thread(reports_cache.top_with_scores, user_query, 8)
-            merged.extend(("report", p, c, s) for (p, c, s) in rep_top)
             if getattr(gdocs_cache, "enabled", False):
                 # Refresh gdocs cache if needed and fetch top
                 await asyncio.to_thread(gdocs_cache.refresh)
@@ -536,9 +616,8 @@ async def on_message(new_msg: discord.Message) -> None:
                 parts.append(f"### Source: {label} (score {score})\n{chunk}")
             docs_context = "\n\n".join(parts)
             logging.info(
-                "Context built from %d chunks (%d unique sources, reports=%s, gdocs=%s), length=%d chars",
-                len(merged), len(sources), "T" if getattr(reports_cache, "enabled", False) else "F",
-                "T" if getattr(gdocs_cache, "enabled", False) else "F", len(docs_context)
+                "Context built from %d chunks (%d unique sources, gdocs=%s), length=%d chars",
+                len(merged), len(sources), "T" if getattr(gdocs_cache, "enabled", False) else "F", len(docs_context)
             )
 
             context_prompt = (
@@ -555,8 +634,9 @@ async def on_message(new_msg: discord.Message) -> None:
 
     # Determine provider/model strictly from config
     active_provider = provider.lower()
-    use_gemini = (active_provider in ("gemini", "google")) and bool(gemini_api_key)
+    use_gemini = (active_provider == "google") and bool(gemini_api_key)
     use_anthropic = (active_provider == "anthropic") and bool(anthropic_api_key)
+    use_openrouter = (active_provider == "openrouter") and bool(api_key)
     gemini_model_name = model
 
     # Generate and send response message(s)
@@ -571,12 +651,11 @@ async def on_message(new_msg: discord.Message) -> None:
     use_plain_responses = config.get("use_plain_responses", False)
     max_message_length = 2000 if use_plain_responses else (4096 - len(STREAMING_INDICATOR))
 
-    # Fast relevance prefilter: if docs/reports don't match the query well, skip LLM
+    # Fast relevance prefilter: if docs don't match the query well, skip LLM
     if dao_trigger:
         try:
             scored_docs = await asyncio.to_thread(dao_docs.top_with_scores, user_query, 3)
-            scored_reports = await asyncio.to_thread(reports_cache.top_with_scores, user_query, 3)
-            best_score = max((s for _, _, s in (scored_docs + scored_reports)), default=0)
+            best_score = max((s for _, _, s in scored_docs), default=0)
             # Threshold tuned conservatively; adjust as needed
             if best_score < 35:
                 not_covered = (
@@ -665,8 +744,14 @@ async def on_message(new_msg: discord.Message) -> None:
                                 r_sources.append(rel)
                             r_parts.append(f"### Source: {rel} (score {score})\n{chunk}")
                         r_docs_context = "\n\n".join(r_parts)
+                        # Try to get system prompt for retry
+                        try:
+                            retry_system_prompt = load_system_prompt()
+                        except ValueError:
+                            retry_system_prompt = ""
+
                         r_prompt = (
-                            (sys_prompt + "\n\n") if (config.get("system_prompt") and sys_prompt) else ""
+                            (retry_system_prompt + "\n\n") if retry_system_prompt else ""
                         ) + (
                             "SYSTEM INSTRUCTIONS: Answer ONLY using the DAO documentation context below.\n"
                             "- If the answer is not present, say it is not covered. Do not speculate.\n"
@@ -889,6 +974,104 @@ async def on_message(new_msg: discord.Message) -> None:
                         await msg_nodes[response_msg.id].lock.acquire()
                 except Exception:
                     logging.exception("Failed to send Discord response message (Anthropic)")
+            elif use_openrouter:
+                # OpenRouter streaming path
+                # Optional debug: log exact prompt to terminal (OpenRouter path)
+                if config.get("debug_prompt") is True:
+                    ordered = messages[::-1]
+                    prompt_text = "\n\n".join([m.get("content", "") for m in ordered])
+                    if prompt_text:
+                        logging.info("===== DEBUG PROMPT BEGIN (chars=%d) =====", len(prompt_text))
+                        print(prompt_text)
+                        logging.info("===== DEBUG PROMPT END =====")
+                if not api_key:
+                    # Friendly error if OpenRouter is selected but no key configured
+                    err_msg = (
+                        "OpenRouter provider is selected but no API key is configured. "
+                        "Set providers.openrouter.api_key or OPENROUTER_API_KEY, or switch models to a different provider."
+                    )
+                    if use_plain_responses:
+                        response_msg = await new_msg.reply(content=err_msg[:max_message_length], suppress_embeds=True)
+                        response_msgs.append(response_msg)
+                    else:
+                        embed_err = discord.Embed(description=err_msg[:max_message_length], color=EMBED_COLOR_COMPLETE)
+                        response_msg = await new_msg.reply(embed=embed_err, silent=True)
+                        response_msgs.append(response_msg)
+
+                    msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
+                    await msg_nodes[response_msg.id].lock.acquire()
+                    return
+
+                # Filter extra_body for OpenRouter compatibility
+                openrouter_body = {}
+                if extra_body:
+                    # Only pass parameters that OpenRouter accepts
+                    for key, value in extra_body.items():
+                        if key in ('temperature', 'max_tokens', 'top_p', 'frequency_penalty', 'presence_penalty'):
+                            openrouter_body[key] = value
+
+                logging.info(f"🔍 OpenRouter Request Debug:")
+                logging.info(f"   Model: {model}")
+                logging.info(f"   API Key present: {bool(api_key)}")
+                logging.info(f"   Filtered extra_body: {openrouter_body}")
+
+                openai_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+                kwargs = dict(model=model, messages=messages[::-1], stream=True, extra_headers=extra_headers, extra_query=extra_query, **openrouter_body)
+                async for chunk in await openai_client.chat.completions.create(**kwargs):
+                    if finish_reason != None:
+                        break
+
+                    if not (choice := chunk.choices[0] if chunk.choices else None):
+                        continue
+
+                    finish_reason = choice.finish_reason
+
+                    prev_content = curr_content or ""
+                    curr_content = choice.delta.content or ""
+
+                    new_content = prev_content if finish_reason == None else (prev_content + curr_content)
+
+                    if response_contents == [] and new_content == "":
+                        continue
+
+                    if start_next_msg := response_contents == [] or len(response_contents[-1] + new_content) > max_message_length:
+                        response_contents.append("")
+
+                    response_contents[-1] += new_content
+
+                    if not use_plain_responses:
+                        ready_to_edit = (edit_task == None or edit_task.done()) and datetime.now().timestamp() - last_task_time >= EDIT_DELAY_SECONDS
+                        msg_split_incoming = finish_reason == None and len(response_contents[-1] + curr_content) > max_message_length
+                        is_final_edit = finish_reason != None or msg_split_incoming
+                        is_good_finish = finish_reason != None and finish_reason.lower() in ("stop", "end_turn")
+
+                        if start_next_msg or ready_to_edit or is_final_edit:
+                            if edit_task != None:
+                                await edit_task
+
+                            embed.description = response_contents[-1] if is_final_edit else (response_contents[-1] + STREAMING_INDICATOR)
+                            embed.color = EMBED_COLOR_COMPLETE if msg_split_incoming or is_good_finish else EMBED_COLOR_INCOMPLETE
+
+                            if start_next_msg:
+                                reply_to_msg = new_msg if response_msgs == [] else response_msgs[-1]
+                                response_msg = await reply_to_msg.reply(embed=embed, silent=True)
+                                response_msgs.append(response_msg)
+
+                                msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
+                                await msg_nodes[response_msg.id].lock.acquire()
+                            else:
+                                edit_task = asyncio.create_task(response_msg.edit(embed=embed))
+
+                            last_task_time = datetime.now().timestamp()
+
+                if use_plain_responses:
+                    for content in response_contents:
+                        reply_to_msg = new_msg if response_msgs == [] else response_msgs[-1]
+                        response_msg = await reply_to_msg.reply(content=content, suppress_embeds=True)
+                        response_msgs.append(response_msg)
+
+                        msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
+                        await msg_nodes[response_msg.id].lock.acquire()
             else:
                 # OpenAI-compatible streaming path
                 # Optional debug: log exact prompt to terminal (OpenAI path)
@@ -990,16 +1173,123 @@ async def on_message(new_msg: discord.Message) -> None:
 
 
 async def main() -> None:
-    await discord_bot.start(config["bot_token"])
+    # Debug: Show what bot token we're trying to use
+    bot_token = config["bot_token"]
+    token_preview = bot_token[:20] + "..." if len(bot_token) > 20 else bot_token
+    # logging.info(f"🔐 Attempting Discord login with token: {token_preview}")
+    # logging.info(f"   Token length: {len(bot_token)} characters")
+    # logging.info(f"   Token starts with: {bot_token[:10] if bot_token else 'None'}")
+    # logging.info(f"   Token ends with: {bot_token[-10:] if bot_token else 'None'}")
+    # logging.info(f"   Config loaded: {type(config)} with keys: {list(config.keys())}")
+
+    if not bot_token or bot_token.startswith('$'):
+        logging.error("❌ Bot token appears to be unset or using unexpanded environment variable!")
+        logging.error("   Make sure to set KNOWLEDGE_BOT_DISCORD_TOKEN environment variable")
+        logging.error("   In PowerShell: $env:KNOWLEDGE_BOT_DISCORD_TOKEN = 'YOUR_TOKEN'")
+        raise ValueError("Discord bot token not properly configured")
+
+    try:
+        logging.info("🚀 Starting Discord bot...")
+        await discord_bot.start(bot_token)
+    except discord.LoginFailure as e:
+        logging.error(f"❌ Discord Login Failure: {e}")
+        logging.error(f"   Error type: {type(e).__name__}")
+        logging.error(f"   Error message: {str(e)}")
+        # Try to get more details from the underlying exception
+        if hasattr(e, '__cause__') and e.__cause__:
+            logging.error(f"   Underlying cause: {e.__cause__}")
+            logging.error(f"   Underlying type: {type(e.__cause__).__name__}")
+        raise
+    except discord.HTTPException as e:
+        logging.error(f"❌ Discord HTTP Exception: {e}")
+        logging.error(f"   Status: {e.status}")
+        logging.error(f"   Code: {e.code}")
+        logging.error(f"   Text: {e.text}")
+        if hasattr(e, 'response'):
+            logging.error(f"   Response: {e.response}")
+        if hasattr(e, 'json') and e.json:
+            logging.error(f"   JSON: {e.json}")
+        raise
+    except Exception as e:
+        logging.error(f"❌ Unexpected Discord error: {type(e).__name__}: {e}")
+        logging.error(f"   Full traceback: {e.__traceback__}")
+        raise
 
 
 try:
-    # Startup diagnostics: backend/model selection and modes
-    model_key_startup = next(iter(config.get("models", {}) or {"openai/gpt-4o-mini": {}}))
-    provider_startup = model_key_startup.split("/", 1)[0].lower()
+    # Use the NEW explicit primary provider configuration (preferred)
+    startup_primary_provider = config.get("primary_provider")
+    startup_primary_model = config.get("primary_model")
+
+    if startup_primary_provider and startup_primary_model:
+        logging.info("📋 Using NEW explicit primary provider configuration:")
+        logging.info(f"   Primary Provider: {startup_primary_provider}")
+        logging.info(f"   Primary Model: {startup_primary_model}")
+
+        provider_startup = startup_primary_provider
+        model_name = startup_primary_model
+        startup_name = f"{startup_primary_provider}/{startup_primary_model}"
+    else:
+        # Fall back to OLD model list format for compatibility
+        logging.info("📋 Using OLD model list format (deprecated):")
+        first_model = next(iter(config.get("models", [])), None)
+        if first_model:
+            startup_provider = first_model.get("provider", "unknown")
+            startup_model = first_model.get("model", "unknown")
+            startup_name = first_model.get("name", f"{startup_provider}/{startup_model}")
+        else:
+            startup_provider = "none"
+            startup_model = "none"
+            startup_name = "none"
+
+        provider_startup = startup_provider
+        model_name = startup_model
+
+    # Use the NEW explicit primary provider configuration (preferred)
+    startup_primary_provider = config.get("primary_provider")
+    startup_primary_model = config.get("primary_model")
+
+    if startup_primary_provider and startup_primary_model:
+        logging.info("📋 Using NEW explicit primary provider configuration:")
+        logging.info(f"   Primary Provider: {startup_primary_provider}")
+        logging.info(f"   Primary Model: {startup_primary_model}")
+
+        provider_startup = startup_primary_provider
+        model_name = startup_primary_model
+        startup_name = f"{startup_primary_provider}/{startup_primary_model}"
+    else:
+        # Fall back to OLD model list format for compatibility
+        logging.info("📋 Using OLD model list format (deprecated):")
+        first_model = next(iter(config.get("models", [])), None)
+        if first_model:
+            startup_provider = first_model.get("provider", "unknown")
+            startup_model = first_model.get("model", "unknown")
+            startup_name = first_model.get("name", f"{startup_provider}/{startup_model}")
+        else:
+            startup_provider = "none"
+            startup_model = "none"
+            startup_name = "none"
+
+        provider_startup = startup_provider
+        model_name = startup_model
+
+    # Always define startup_provider for debug logging
+    if not startup_primary_provider:
+        startup_provider = provider_startup
+    else:
+        startup_provider = startup_primary_provider
+
+    # Now we have consistent variable names - log them
+    logging.info(f"   startup_provider: '{startup_provider}'")
+    logging.info(f"   provider_startup.lower(): '{provider_startup}'")
+    logging.info(f"   Checking conditions:")
+    logging.info(f"   - 'gemini' or 'google': {provider_startup in ('gemini', 'google')}")
+    logging.info(f"   - 'openai': {provider_startup == 'openai'}")
+    logging.info(f"   - 'openrouter': {provider_startup == 'openrouter'}")
+    logging.info(f"   - 'anthropic': {provider_startup == 'anthropic'}")
+
     if provider_startup in ("gemini", "google"):
         backend = "Gemini"
-        model_name = model_key_startup.split("/", 1)[1] if "/" in model_key_startup else model_key_startup
         gem_cfg = (config.get("providers", {}).get("gemini", {}) or {})
         goo_cfg = (config.get("providers", {}).get("google", {}) or {})
         key_gem = gem_cfg.get("api_key")
@@ -1010,17 +1300,29 @@ try:
         logging.info("Startup: backend=%s, model=%s, api_key_present=%s, source=%s", backend, model_name, api_present, source)
     elif provider_startup == "openai":
         backend = "OpenAI"
-        model_name = model_key_startup.split("/", 1)[1] if "/" in model_key_startup else model_key_startup
         base_url = (config.get("providers", {}).get("openai", {}) or {}).get("base_url")
         api_present = bool((config.get("providers", {}).get("openai", {}) or {}).get("api_key") or os.getenv("OPENAI_API_KEY"))
         logging.info("Startup: backend=%s, model=%s, base_url=%s, api_key_present=%s", backend, model_name, base_url, api_present)
+    elif provider_startup == "openrouter":
+        backend = "OpenRouter"
+        base_url = (config.get("providers", {}).get("openrouter", {}) or {}).get("base_url")
+        api_present = bool((config.get("providers", {}).get("openrouter", {}) or {}).get("api_key") or os.getenv("OPENROUTER_API_KEY"))
+        logging.info("Startup: backend=%s, model=%s, base_url=%s, api_key_present=%s", backend, model_name, base_url, api_present)
     elif provider_startup == "anthropic":
         backend = "Anthropic"
-        model_name = model_key_startup.split("/", 1)[1] if "/" in model_key_startup else model_key_startup
         api_present = bool((config.get("providers", {}).get("anthropic", {}) or {}).get("api_key") or os.getenv("ANTHROPIC_API_KEY"))
         logging.info("Startup: backend=%s, model=%s, api_key_present=%s", backend, model_name, api_present)
     else:
-        logging.info("Startup: backend=%s (custom), model_key=%s", provider_startup, model_key_startup)
+        backend = f"Unknown ({provider_startup})"
+        logging.warning("Startup: Unknown provider %s for model %s", provider_startup, model_name)
+
+    # Check if the selected provider actually has API access
+    provider_config = config.get("providers", {}).get(provider_startup, {})
+    provider_api_key = provider_config.get("api_key") or os.getenv(f"{provider_startup.upper()}_API_KEY".replace("OPENROUTER", "OPENROUTER").replace("GEMINI", "GEMINI"))
+    if provider_api_key:
+        logging.info("Startup: ✅ %s API key found and configured", provider_startup.upper())
+    else:
+        logging.warning("Startup: ⚠️  %s API key NOT found - check environment variables", provider_startup.upper())
 
     if config.get("test_echo_mode", False):
         logging.info("Startup: test_echo_mode is ENABLED (LLM calls will be skipped)")

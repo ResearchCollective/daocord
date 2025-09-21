@@ -1,0 +1,175 @@
+# Report Bot Configuration
+# This bot handles X/Twitter and Reddit monitoring and report generation
+
+# Discord settings for report bot:
+bot_token: $REPORT_BOT_DISCORD_TOKEN
+client_id: $REPORT_BOT_CLIENT_ID
+status_message: "Report Generator"
+
+# Data and monitoring settings
+max_text: 100000
+max_images: 1
+max_messages: 25
+
+# Report generation settings
+report_interval_cron: "0 0 0 * *"  # default to weekly
+report_channel_ids: []  # Discord channels to post reports to
+use_plain_responses: false
+allow_dms: false
+
+# Approval workflow settings
+approval:
+  enabled: true  # Enable approval workflow
+  approvers_role_id: ""  # Discord role ID for approvers
+  quarantine_dir: "data/quarantine"  # Where reports go before approval
+  approved_dir: "data/approved"  # Where reports go after approval
+  reaction_emoji: "✅"  # Emoji for approval
+  rejection_emoji: "❌"  # Emoji for rejection
+  min_approvals: 1  # Minimum approvals needed
+  auto_cleanup_days: 30  # Days to keep unapproved reports
+
+# Report settings
+reports:
+  include_summary: true  # Include LLM-generated summary in Discord posts
+  summary_max_length: 500  # Max length of summary in characters
+  max_reports_per_post: 3  # Max reports to post at once
+  embed_color_pending: 0xffa500  # Orange for pending approval
+  embed_color_approved: 0x00ff00  # Green for approved
+  embed_color_rejected: 0xff0000  # Red for rejected
+
+# Debug settings
+debug_prompt: false
+test_echo_mode: false
+disable_safety: true
+
+# X/Twitter monitoring
+twitter:
+  bearer_token_env: $X_BEARER_TOKEN
+  cache:
+    search_dir: "data/x/searches"
+    events_dir: "data/x/events"
+    ttl_hours: 24
+    calls_log: "data/logs/x_calls.jsonl"
+  logs:
+    calls_file: "data/logs/x_calls.jsonl"
+  monitor:
+    out_dir: "reports"
+  # Simple monitoring configuration
+  keywords: ["longevity dogs", "aging research", "canine health"]
+  users: ["dogagingproject", "steven_austad", "MattKaeberlein"]
+  exclude_keywords: ["giveaway", "promo", "advertisement"]
+  search_limit: 15
+  since_days: 7
+  filters:
+    min_like: 1  # Lower threshold for user monitoring
+    include_any: ["longevity", "aging", "lifespan", "research"]
+    exclude_any: ["giveaway"]
+  bundle:
+    self_limit: 10
+    quotes_limit: 10
+
+# Reddit monitoring
+reddit:
+  client_id: $REDDIT_CLIENT_ID
+  client_secret: $REDDIT_CLIENT_SECRET
+  user_agent: "api-event-script"
+
+  cache:
+    search_dir: "data/reddit/searches"
+    events_dir: "data/reddit/events"
+    ttl_hours: 24
+    calls_log: "data/logs/reddit_calls.jsonl"
+  monitor:
+    out_dir: "reports"
+  # Simple monitoring configuration
+  subreddits: ["longevity", "aging", "biohacking", "dogs", "DogCare"]
+  keywords: ["trial", "study", "research", "longevity", "aging", "lifespan"]
+  exclude_keywords: ["giveaway", "promo", "advertisement", "vet bill"]
+  search_limit: 15
+  since_days: 7
+  filters:
+    min_score: 3
+    include_any: ["trial", "study", "paper", "research"]
+    exclude_any: ["giveaway", "promo", "advertisement"]
+  bundle:
+    comments_limit: 200
+    include_crossposts: true
+
+# LLM settings for report generation:
+providers:
+  # Remote providers:
+  anthropic:
+    base_url: https://api.anthropic.com/v1
+    api_key: $ANTHROPIC_API_KEY
+  google:
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key: $GEMINI_API_KEY
+  groq:
+    base_url: https://api.groq.com/openai/v1
+    api_key: $GROQ_API_KEY
+  mistral:
+    base_url: https://api.mistral.ai/v1
+    api_key: $MISTRAL_API_KEY
+  openai:
+    base_url: https://api.openai.com/v1
+    api_key: $OPENAI_API_KEY
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key: $OPENROUTER_API_KEY
+  x-ai:
+    base_url: https://api.x.ai/v1
+    api_key: $XAI_API_KEY
+
+  # Local providers:
+  lmstudio:
+    base_url: http://localhost:1234/v1
+  ollama:
+    base_url: http://localhost:11434/v1
+  vllm:
+    base_url: http://localhost:8000/v1
+
+# Default model for report generation
+models:
+  anthropic/claude-3-5-sonnet-20240620: {}
+
+# Report generation settings
+report_generation:
+  # What to look for and extract
+  focus_areas:
+    - companies
+    - people_and_roles
+    - interventions_and_treatments
+    - research_developments
+    - clinical_trials
+    - scientific_studies
+
+  # Output schema requirements
+  schema_requirements:
+    companies: ["name", "notes", "industry_sector"]
+    people: ["name", "role", "affiliation", "expertise_area"]
+    interventions: ["name", "type", "mechanism", "stage", "notes"]
+    developments: ["summary", "significance", "timeline"]
+
+  # Domain-specific focus
+  domain_focus: "canine_longevity"
+  key_topics:
+    - longevity_interventions
+    - aging_research
+    - dog_health_studies
+    - veterinary_medicine
+    - biotech_innovations
+
+  # Quality filters
+  quality_thresholds:
+    min_scientific_rigor: medium
+    exclude_categories: ["anecdotal", "unverified_claims", "marketing_hype"]
+    prioritize_sources: ["peer_reviewed", "clinical_trials", "research_papers"]
+
+  # Report customization
+  custom_instructions: |
+    Focus on evidence-based developments in canine longevity research.
+    Extract specific companies working on anti-aging interventions for dogs.
+    Identify key researchers and their institutional affiliations.
+    Highlight novel therapeutic approaches and their development stage.
+    Include information about ongoing or completed clinical trials.
+    Prioritize content from verified scientific sources over social media discussions.

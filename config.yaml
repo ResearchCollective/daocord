@@ -1,14 +1,14 @@
 # Discord settings:
 
-bot_token: $BOT_DISCORD_TOKEN
-client_id: $BOT_CLIENT_ID
+bot_token: $KNOWLEDGE_BOT_DISCORD_TOKEN
+client_id: $KNOWLEDGE_BOT_CLIENT_ID
 status_message: "Dog Years DAO Assistant"
 
 max_text: 100000
 max_images: 1
 max_messages: 25
 
-use_plain_responses: false
+use_plain_responses: true
 allow_dms: true
 
 
@@ -17,7 +17,7 @@ test_echo_mode: false
 disable_safety: true
 
 gdocs:
-  enabled: true
+  enabled: false
   credentials:
     type: service_account
     project_id: $GOOGLE_PROJECT_ID
@@ -37,58 +37,6 @@ gdocs:
   max_files: 1000                      # guardrails
   export_mime: "text/markdown"         # fallback to text/plain if markdown not supported
 
-
-twitter:
-  bearer_token_env: $X_BEARER_TOKEN
-  cache:
-    search_dir: "data/x/searches"
-    events_dir: "data/x/events"
-    ttl_hours: 24
-    calls_log: "data/logs/x_calls.jsonl"
-  logs:
-    calls_file: "data/logs/x_calls.jsonl"
-  monitor:
-    out_dir: "reports"
-  monitors:
-    name: "longevity-dogs"
-    query: "longevity dogs"
-    lang: en
-    search_limit: 15
-    since_days: 7
-    filters:
-      min_like: 5
-      include_any: ["trial", "study", "paper"]
-      exclude_any: ["giveaway"]
-    bundle:
-      self_limit: 10
-      quotes_limit: 10
-    
-    
-reddit:
-  client_id: $REDDIT_CLIENT_ID
-  client_secret: $REDDIT_CLIENT_SECRET
-  user_agent: "api-event-script"
-
-  cache:
-    search_dir: "data/reddit/searches"
-    events_dir: "data/reddit/events"
-    ttl_hours: 24
-    calls_log: "data/logs/reddit_calls.jsonl"
-  monitor:
-    out_dir: "reports"
-  monitors:
-    name: "longevity-dogs"
-    subs: ["longevity", "dogs"]
-    lang: en
-    search_limit: 15
-    since_days: 7
-    filters:
-      min_like: 5
-      include_any: ["trial", "study", "paper"]
-      exclude_any: ["giveaway"]
-    bundle:
-      self_limit: 10
-      quotes_limit: 10
 
 permissions:
   users:
@@ -124,7 +72,7 @@ providers:
     api_key: 
   openrouter:
     base_url: https://openrouter.ai/api/v1
-    api_key: 
+    api_key: $OPENROUTER_API_KEY
   x-ai:
     base_url: https://api.x.ai/v1
     api_key: 
@@ -137,11 +85,42 @@ providers:
   vllm:
     base_url: http://localhost:8000/v1
 
+# =============================================================================
+# PRIMARY PROVIDER CONFIGURATION
+# =============================================================================
+# The SINGLE, UNAMBIGUOUS setting for which LLM provider to use:
+primary_provider: openrouter  # ← THIS IS THE ONLY PROVIDER THAT MATTERS
+
+# Model for the primary provider:
+primary_model: openai/gpt-oss-120b
+
+# Optional fallback models (only used if primary fails):
+fallback_models:
+  - provider: openai
+    model: gpt-4o-mini
+  - provider: google
+    model: gemini-2.5-flash
+
+# =============================================================================
+# OLD MODEL LIST (DEPRECATED - kept for compatibility)
+# =============================================================================
+
 models:
-  anthropic/claude-3-5-sonnet-20240620: {}
-  google/gemini-2.5-flash: {}
-  google/gemini-2.5-pro: 
+  - provider: openrouter
+    model: openai/gpt-oss-120b
+  - provider: openai
+    model: gpt-4o-mini
+    name: "OpenAI GPT-4o Mini"
+  - provider: google
+    model: gemini-2.5-flash
+    name: "Google Gemini 2.5 Flash"
+  - provider: google
+    model: gemini-2.5-pro
+    name: "Google Gemini 2.5 Pro"
     reasoning_effort: high
+  - provider: anthropic
+    model: claude-3-5-sonnet-20241022
+    name: "Anthropic Claude 3.5 Sonnet"
 
 
-system_prompt: $SYSTEM_PROMPT_DAOCORD
+system_prompt: $SYSTEM_PROMPT_DAOCORD     # Fallback system prompt via env var (optional)

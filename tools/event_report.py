@@ -308,5 +308,169 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+async def generate_reports(config: Dict[str, Any], system_prompt: str = "") -> List[Dict[str, Any]]:
+    """Generate reports from X/Twitter and Reddit monitoring data.
+
+    Args:
+        config: Configuration dictionary
+        system_prompt: Custom system prompt to use for report generation
+
+    Returns:
+        List of report dictionaries with title, content, and sources
+    """
+    import asyncio
+    from pathlib import Path
+
+    reports = []
+
+    try:
+        # Find all event bundle files
+        x_events_dir = Path("data/x/events")
+        reddit_events_dir = Path("data/reddit/events")
+
+        bundle_files = []
+
+        # Collect X/Twitter bundles
+        if x_events_dir.exists():
+            bundle_files.extend(x_events_dir.glob("*.json"))
+
+        # Collect Reddit bundles
+        if reddit_events_dir.exists():
+            bundle_files.extend(reddit_events_dir.glob("*.json"))
+
+        if not bundle_files:
+            return reports
+
+    except Exception as e:
+        print(f"Error generating reports: {e}")
+        return reports
+
+        # Process each bundle
+        for bundle_file in bundle_files:
+            try:
+                bundle = read_bundle(str(bundle_file))
+                source = infer_source(bundle, None)
+
+                if source == "unknown":
+                    continue
+
+                blocks = extract_text_blocks(bundle, source)
+
+                if not blocks:
+                    continue
+
+                # Use custom system prompt if provided, otherwise use default
+                if system_prompt:
+                    prompt = system_prompt + "\n\n" + build_prompt(blocks, source)
+                else:
+                    prompt = build_prompt(blocks, source)
+
+                # Get model configuration
+                model_key = next(iter(config.get("models", {}) or {"openai/gpt-4o-mini": {}}))
+                provider, conf_model = model_key.split("/", 1) if "/" in model_key else ("openai", model_key)
+
+                prov_lower = provider.lower()
+                if prov_lower in ("gemini", "google"):
+                    result_text = call_gemini(config, prompt, model_name=conf_model)
+                elif prov_lower == "anthropic":
+                    result_text = call_anthropic(config, prompt, model_name=conf_model)
+                else:
+                    # Use sync OpenAI client for compatibility
+                    result_text = await asyncio.get_event_loop().run_in_executor(
+                        None, call_openai_compatible, config, prov_lower, prompt, conf_model
+                    )
+
+                # Clean up response
+                def _strip_code_fences(s: str) -> str:
+                    s = s.strip()
+                    if s.startswith("```"):
+                        tmp = s[3:]
+                        if "\n" in tmp:
+                            tmp = tmp.split("\n", 1)[1]
+                        if tmp.endswith("```"):
+                            tmp = tmp[:-3]
+                        return tmp.strip()
+                    return s
+
+                cleaned = _strip_code_fences(result_text)
+
+                # Create report
+                report = {
+                    "title": f"Research Report - {source.upper()} {bundle_file.stem}",
+                    "content": cleaned,
+                    "sources": [str(bundle_file)],
+                    "timestamp": bundle_file.stat().st_mtime
+                }
+
+                reports.append(report)
+
+            except Exception as e:
+                print(f"Error processing bundle {bundle_file}: {e}")
+                continue
+
+def generate_summary(config: Dict[str, Any], report_content: str, max_length: int = 500) -> str:
+    """Generate a concise summary of a report using LLM.
+
+    Args:
+        config: Configuration dictionary
+        report_content: The full report content to summarize
+        max_length: Maximum length of summary in characters
+
+    Returns:
+        A concise summary of the report
+    """
+    # Truncate content if too long for prompt
+    max_content_length = 4000  # Leave room for prompt
+    if len(report_content) > max_content_length:
+        content = report_content[:max_content_length] + "..."
+    else:
+        content = report_content
+
+    prompt = f"""Please provide a concise summary (under {max_length} characters) of the following research report:
+
+{content}
+
+Summary guidelines:
+- Focus on key findings and implications
+- Include main topics and conclusions
+- Keep it objective and factual
+- Use clear, accessible language
+- Mention the source platform if relevant
+
+Summary:"""
+
+    try:
+        # Get model configuration
+        model_key = next(iter(config.get("models", {}) or {"openai/gpt-4o-mini": {}}))
+        provider, conf_model = model_key.split("/", 1) if "/" in model_key else ("openai", model_key)
+
+        prov_lower = provider.lower()
+        if prov_lower in ("gemini", "google"):
+            result_text = call_gemini(config, prompt, model_name=conf_model)
+        elif prov_lower == "anthropic":
+            result_text = call_anthropic(config, prompt, model_name=conf_model)
+        else:
+            result_text = call_openai_compatible(config, prov_lower, prompt, model_name=conf_model)
+
+        # Clean up response
+        def _strip_code_fences(s: str) -> str:
+            s = s.strip()
+            if s.startswith("```"):
+                tmp = s[3:]
+                if "\n" in tmp:
+                    tmp = tmp.split("\n", 1)[1]
+                if tmp.endswith("```"):
+                    tmp = tmp[:-3]
+                return tmp.strip()
+            return s
+
+        summary = _strip_code_fences(result_text).strip()
+
+        # Ensure summary doesn't exceed max length
+        if len(summary) > max_length:
+            summary = summary[:max_length-3] + "..."
+
+        return summary
+
+    except Exception as e:
+        return f"Error generating summary: {str(e)}"
