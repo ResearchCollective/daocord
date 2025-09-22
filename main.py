@@ -588,6 +588,30 @@ try:
     if config.get("test_echo_mode", False):
         logging.info("Startup: test_echo_mode is ENABLED (LLM calls will be skipped)")
 
-    discord_bot.run(config["bot_token"])
+    # --- Discord token sanitation and diagnostics (helps with Railway 401s) ---
+    raw_token = str(config.get("bot_token") or "")
+    token_clean = raw_token.strip().replace("\r", "").replace("\n", "")
+    if token_clean.lower().startswith("bot "):
+        logging.warning("[discord] Token had 'Bot ' prefix; removing per discord.py expectations")
+        token_clean = token_clean[4:].strip()
+    if token_clean.startswith("$"):
+        logging.error("[discord] Bot token appears to be an unexpanded env var: %s", token_clean)
+        # Attempt to resolve from environment (supports $VAR or ${VAR})
+        env_name = token_clean[2:-1] if (token_clean.startswith("${") and token_clean.endswith("}")) else token_clean.lstrip("$")
+        resolved = os.getenv(env_name, "")
+        if resolved:
+            token_clean = resolved.strip().replace("\r", "").replace("\n", "")
+            logging.info("[discord] Resolved token from environment: %s -> len=%s", env_name, len(token_clean))
+        else:
+            logging.error("[discord] Env var %s is not set; cannot resolve bot token", env_name)
+    # Basic shape check: Discord tokens usually contain dots
+    looks_ok = "." in token_clean and len(token_clean) > 20
+    masked = (token_clean[:4] + "…" + token_clean[-6:]) if token_clean else "<empty>"
+    logging.info("[discord] Using bot token (sanitized): len=%s looks_ok=%s masked=%s", len(token_clean), looks_ok, masked)
+
+    if not looks_ok:
+        logging.error("[discord] Bot token does not look valid. Check Railway env var expansion and value.")
+
+    discord_bot.run(token_clean)
 except KeyboardInterrupt:
     pass
