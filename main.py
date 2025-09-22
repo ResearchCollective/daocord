@@ -543,7 +543,7 @@ async def on_message(new_msg: discord.Message) -> None:
                 sources = []
                 for path, _, score in top:
                     rel = os.path.relpath(path, start="docs") if isinstance(path, str) else str(path)
-                    sources.append(f"{rel} (score {score})")
+                    sources.append(f"{rel}")
                 suffix = "\n\nSources:\n- " + "\n- ".join(sources[:5])
                 await new_msg.reply((answer_text + suffix)[:1900], suppress_embeds=True, silent=True)
             except Exception:

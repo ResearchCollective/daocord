@@ -2,7 +2,7 @@
 
 bot_token: $KNOWLEDGE_BOT_DISCORD_TOKEN
 client_id: $KNOWLEDGE_BOT_CLIENT_ID
-status_message: "Dog Years DAO Assistant"
+status_message: $KNOWLEDGE_BOT_STATUS_MESSAGE
 
 max_text: 100000
 max_images: 1
@@ -90,11 +90,11 @@ providers:
 # =============================================================================
 # The SINGLE, UNAMBIGUOUS setting for which LLM provider to use:
 #primary_provider: openrouter  # ← THIS IS THE ONLY PROVIDER THAT MATTERS
-primary_provider: openrouter
+primary_provider: $LLM_PRIMARY_PROVIDER
 
 # Model for the primary provider:
 #primary_model: openai/gpt-oss-120b
-primary_model: anthropic/claude-sonnet-4
+primary_model: $LLM_PRIMARY_MODEL
 
 # Optional fallback models (only used if primary fails):
 fallback_models:
