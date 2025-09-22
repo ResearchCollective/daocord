@@ -498,32 +498,33 @@ async def on_message(new_msg: discord.Message) -> None:
 
         # Use LLM to answer using the top documentation chunks
         try:
-            # Build a context string capped to a safe size
-            context_parts = []
-            total = 0
-            for path, chunk, score in top:
-                rel = os.path.relpath(path, start="docs") if isinstance(path, str) else str(path)
-                header = f"From {rel} (score {score}):\n"
-                body = (chunk or "").strip()
-                piece = header + body + "\n\n"
-                if total + len(piece) > 6000:
-                    remaining = 6000 - total
-                    if remaining > 0:
-                        context_parts.append(piece[:remaining])
-                        total += remaining
-                    break
-                context_parts.append(piece)
-                total += len(piece)
-            docs_context = "".join(context_parts)
+            async with new_msg.channel.typing():
+                # Build a context string capped to a safe size
+                context_parts = []
+                total = 0
+                for path, chunk, score in top:
+                    rel = os.path.relpath(path, start="docs") if isinstance(path, str) else str(path)
+                    header = f"From {rel} (score {score}):\n"
+                    body = (chunk or "").strip()
+                    piece = header + body + "\n\n"
+                    if total + len(piece) > 6000:
+                        remaining = 6000 - total
+                        if remaining > 0:
+                            context_parts.append(piece[:remaining])
+                            total += remaining
+                        break
+                    context_parts.append(piece)
+                    total += len(piece)
+                docs_context = "".join(context_parts)
 
-            # Provider-agnostic LLM call via llm_config
-            try:
-                answer_text = await llm_config.generate_answer(query_text, docs_context, SYSTEM_PROMPT)
-                if answer_text:
-                    logging.info("[llm] answer generated via llm_config (%d chars)", len(answer_text))
-            except Exception:
-                logging.exception("[llm] llm_config.generate_answer failed")
-                answer_text = None
+                # Provider-agnostic LLM call via llm_config
+                try:
+                    answer_text = await llm_config.generate_answer(query_text, docs_context, SYSTEM_PROMPT)
+                    if answer_text:
+                        logging.info("[llm] answer generated via llm_config (%d chars)", len(answer_text))
+                except Exception:
+                    logging.exception("[llm] llm_config.generate_answer failed")
+                    answer_text = None
 
             if not answer_text:
                 # Fallback: compact docs summary
